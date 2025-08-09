@@ -1,0 +1,28 @@
+# Redpanda configuration for test environment
+redpanda:
+  data_directory: /Users/null/work/flow/infrastructure/redpanda/data
+  seed_servers: []
+  rpc_server:
+    address: 127.0.0.1
+    port: 33145
+  kafka_api:
+    - address: 127.0.0.1
+      port: 9092
+  admin:
+    - address: 127.0.0.1
+      port: 9644
+  developer_mode: true
+
+rpk:
+  enable_usage_stats: false
+  coredump_dir: /Users/null/work/flow/infrastructure/redpanda/coredump
+  
+pandaproxy:
+  pandaproxy_api:
+    - address: 0.0.0.0
+      port: 8082
+
+schema_registry:
+  schema_registry_api:
+    - address: 0.0.0.0
+      port: 8081

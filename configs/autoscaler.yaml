@@ -1,0 +1,121 @@
+evaluation_interval: 30s
+metrics_window: 60s
+use_mock_processes: false
+enable_cascading: true
+enable_backpressure: true
+
+prometheus:
+  url: http://localhost:9090
+  timeout: 5s
+
+services:
+  gateway:
+    name: gateway
+    min_instances: 1
+    max_instances: 6
+    start_command: "./build/gateway"
+    work_dir: "/Users/null/work/flow"
+    health_check:
+      path: /health
+      port: 8088
+      interval: 10s
+      timeout: 3s
+    metrics:
+      - type: cpu
+        threshold: 80
+        aggregation: avg
+      - type: request_rate
+        threshold: 1000
+        aggregation: sum
+    scale_out:
+      increment: 1
+      cooldown: 60s
+    scale_in:
+      increment: 1
+      cooldown: 120s
+  
+  stream-ingester:
+    name: stream-ingester
+    min_instances: 1
+    max_instances: 4
+    start_command: "KAFKA_BROKERS=localhost:19092 ./build/stream-ingester"
+    work_dir: "/Users/null/work/flow"
+    metrics:
+      - type: cpu
+        threshold: 75
+        aggregation: avg
+    scale_out:
+      increment: 1
+      cooldown: 60s
+    scale_in:
+      increment: 1
+      cooldown: 120s
+  
+  hot-tier:
+    name: hot-tier
+    min_instances: 1
+    max_instances: 3
+    start_command: "./build/hot-tier"
+    work_dir: "/Users/null/work/flow"
+    health_check:
+      path: /health
+      port: 9090
+      interval: 10s
+      timeout: 3s
+    metrics:
+      - type: memory
+        threshold: 85
+        aggregation: avg
+    scale_out:
+      increment: 1
+      cooldown: 60s
+    scale_in:
+      increment: 1
+      cooldown: 120s
+  
+  query-api:
+    name: query-api
+    min_instances: 1
+    max_instances: 2
+    start_command: "./build/query-api"
+    work_dir: "/Users/null/work/flow"
+    health_check:
+      path: /health
+      port: 8081
+      interval: 10s
+      timeout: 3s
+    metrics:
+      - type: cpu
+        threshold: 70
+        aggregation: avg
+    scale_out:
+      increment: 1
+      cooldown: 60s
+    scale_in:
+      increment: 1
+      cooldown: 120s
+
+cascade_rules:
+  - trigger: gateway
+    target: stream-ingester
+    ratio: 0.5
+    priority: 10
+  - trigger: stream-ingester
+    target: hot-tier
+    ratio: 0.3
+    priority: 5
+
+backpressure:
+  enabled: true
+  thresholds:
+    low: 70
+    medium: 85
+    high: 95
+    critical: 99
+  strategies:
+    medium:
+      drop_rate: 10
+    high:
+      drop_rate: 30
+    critical:
+      drop_rate: 50

@@ -1,0 +1,153 @@
+syntax = "proto3";
+
+package autoscaler;
+option go_package = "github.com/Milad-Afdasta/TrueNow/services/autoscaler/proto;proto";
+
+import "google/protobuf/timestamp.proto";
+
+// AutoscalerService provides real-time status and control for the autoscaler
+service AutoscalerService {
+  // Get current status of all services
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+  
+  // Stream real-time status updates
+  rpc StreamStatus(StreamStatusRequest) returns (stream StatusUpdate);
+  
+  // Get metrics for a specific service
+  rpc GetServiceMetrics(GetServiceMetricsRequest) returns (ServiceMetrics);
+  
+  // Manually trigger scaling (for testing/emergency)
+  rpc ScaleService(ScaleServiceRequest) returns (ScaleServiceResponse);
+  
+  // Get scaling history
+  rpc GetScalingHistory(GetScalingHistoryRequest) returns (GetScalingHistoryResponse);
+}
+
+message GetStatusRequest {}
+
+message GetStatusResponse {
+  bool running = 1;
+  map<string, ServiceStatus> services = 2;
+  ClusterStatus cluster = 3;
+  google.protobuf.Timestamp last_update = 4;
+}
+
+message ServiceStatus {
+  string name = 1;
+  int32 current_instances = 2;
+  int32 target_instances = 3;
+  int32 min_instances = 4;
+  int32 max_instances = 5;
+  repeated Instance instances = 6;
+  map<string, double> metrics = 7;
+  ServiceState state = 8;
+  string last_scaling_reason = 9;
+  google.protobuf.Timestamp last_scaling_time = 10;
+}
+
+message Instance {
+  string id = 1;
+  string service_name = 2;
+  InstanceStatus status = 3;
+  int32 port = 4;
+  int32 pid = 5;
+  google.protobuf.Timestamp started_at = 6;
+  map<string, double> metrics = 7;
+}
+
+enum InstanceStatus {
+  UNKNOWN = 0;
+  STARTING = 1;
+  RUNNING = 2;
+  UNHEALTHY = 3;
+  STOPPING = 4;
+  STOPPED = 5;
+}
+
+enum ServiceState {
+  IDLE = 0;
+  SCALING_UP = 1;
+  SCALING_DOWN = 2;
+  AT_MAX_SCALE = 3;
+  AT_MIN_SCALE = 4;
+  IN_COOLDOWN = 5;
+}
+
+message ClusterStatus {
+  double total_rps = 1;
+  double avg_cpu = 2;
+  double avg_memory = 3;
+  int32 total_instances = 4;
+  bool backpressure_active = 5;
+  double load_factor = 6;  // 0-1, where 1 is 100% load
+}
+
+message StreamStatusRequest {
+  repeated string services = 1;  // Empty means all services
+  int32 interval_ms = 2;  // How often to send updates (min 100ms)
+}
+
+message StatusUpdate {
+  oneof update {
+    ServiceStatus service_update = 1;
+    ScalingEvent scaling_event = 2;
+    ClusterStatus cluster_update = 3;
+  }
+  google.protobuf.Timestamp timestamp = 4;
+}
+
+message ScalingEvent {
+  string service = 1;
+  ScalingAction action = 2;
+  int32 from_instances = 3;
+  int32 to_instances = 4;
+  string reason = 5;
+  google.protobuf.Timestamp timestamp = 6;
+}
+
+enum ScalingAction {
+  SCALE_UP = 0;
+  SCALE_DOWN = 1;
+  NO_OP = 2;
+}
+
+message GetServiceMetricsRequest {
+  string service_name = 1;
+  int32 window_seconds = 2;  // How far back to look
+}
+
+message ServiceMetrics {
+  string service_name = 1;
+  repeated MetricPoint cpu = 2;
+  repeated MetricPoint memory = 3;
+  repeated MetricPoint request_rate = 4;
+  repeated MetricPoint error_rate = 5;
+  repeated MetricPoint p99_latency = 6;
+}
+
+message MetricPoint {
+  double value = 1;
+  google.protobuf.Timestamp timestamp = 2;
+}
+
+message ScaleServiceRequest {
+  string service_name = 1;
+  int32 target_instances = 2;
+  string reason = 3;
+}
+
+message ScaleServiceResponse {
+  bool success = 1;
+  string message = 2;
+  int32 current_instances = 3;
+  int32 target_instances = 4;
+}
+
+message GetScalingHistoryRequest {
+  string service_name = 1;  // Empty for all services
+  int32 limit = 2;
+}
+
+message GetScalingHistoryResponse {
+  repeated ScalingEvent events = 1;
+}

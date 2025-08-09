@@ -1,0 +1,281 @@
+version: '3.8'
+
+services:
+  # PostgreSQL for Control Plane
+  postgres:
+    image: postgres:14-alpine
+    container_name: flow-postgres
+    environment:
+      POSTGRES_DB: analytics
+      POSTGRES_USER: analytics
+      POSTGRES_PASSWORD: analytics123
+      POSTGRES_INITDB_ARGS: "-c shared_preload_libraries=pg_stat_statements"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U analytics"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - flow-network
+
+  # Redis for caching
+  redis:
+    image: redis:7-alpine
+    container_name: flow-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - flow-network
+
+  # Redpanda (Kafka-compatible) - TEST CONFIGURATION
+  redpanda:
+    image: vectorized/redpanda:latest
+    container_name: flow-redpanda
+    command:
+      - redpanda
+      - start
+      - --smp 2                    # 2 cores for test
+      - --memory 1G                 # 1GB memory for test
+      - --overprovisioned
+      - --node-id 0
+      - --kafka-addr PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092
+      - --advertise-kafka-addr PLAINTEXT://redpanda:29092,OUTSIDE://localhost:9092
+      - --pandaproxy-addr PLAINTEXT://0.0.0.0:28082,OUTSIDE://0.0.0.0:8082
+      - --advertise-pandaproxy-addr PLAINTEXT://redpanda:28082,OUTSIDE://localhost:8082
+      - --schema-registry-addr PLAINTEXT://0.0.0.0:28081,OUTSIDE://0.0.0.0:8081
+      - --advertise-schema-registry-addr PLAINTEXT://redpanda:28081,OUTSIDE://localhost:8081
+    ports:
+      - "9092:9092"     # Kafka API
+      - "8081:8081"     # Schema Registry
+      - "8082:8082"     # Pandaproxy
+      - "9644:9644"     # Prometheus metrics
+    volumes:
+      - redpanda_data:/var/lib/redpanda/data
+    networks:
+      - flow-network
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.*true' || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # Redpanda Console (UI for Kafka)
+  redpanda-console:
+    image: vectorized/console:latest
+    container_name: flow-redpanda-console
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKERS: redpanda:29092
+    ports:
+      - "8083:8080"  # Changed port to avoid conflict
+    networks:
+      - flow-network
+
+  # Control Plane Service
+  control-plane:
+    build:
+      context: ./services/control-plane
+      dockerfile: Dockerfile
+    container_name: flow-control-plane
+    environment:
+      FLOW_ENVIRONMENT: test
+      FLOW_CONTROL_PLANE_DATABASE_HOST: postgres
+      FLOW_CONTROL_PLANE_DATABASE_PASSWORD: analytics123
+      FLOW_CONTROL_PLANE_CACHE_REDIS_ADDR: redis:6379
+    ports:
+      - "8001:8001"  # HTTP API
+      - "9001:9001"  # gRPC
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./configs:/app/configs:ro
+    networks:
+      - flow-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Gateway Service
+  gateway:
+    build:
+      context: ./services/gateway
+      dockerfile: Dockerfile
+    container_name: flow-gateway
+    environment:
+      FLOW_ENVIRONMENT: test
+      FLOW_GATEWAY_KAFKA_BROKERS: redpanda:29092
+      FLOW_CONTROL_PLANE_ENDPOINT: http://control-plane:8001
+    ports:
+      - "8080:8080"  # HTTP ingestion
+      - "9080:9080"  # gRPC
+    depends_on:
+      control-plane:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    volumes:
+      - ./configs:/app/configs:ro
+    networks:
+      - flow-network
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 1G
+
+  # Hot Tier Service (2 instances for testing)
+  hot-tier-1:
+    build:
+      context: ./services/hot-tier
+      dockerfile: Dockerfile
+    container_name: flow-hot-tier-1
+    environment:
+      FLOW_ENVIRONMENT: test
+      SHARD_ID: 0
+      FLOW_HOT_TIER_GRPC_PORT: 9090
+    ports:
+      - "9090:9090"  # gRPC
+      - "8090:8090"  # Metrics
+    volumes:
+      - ./configs:/app/configs:ro
+      - hot_tier_1_data:/tmp/snapshots
+    networks:
+      - flow-network
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+
+  hot-tier-2:
+    build:
+      context: ./services/hot-tier
+      dockerfile: Dockerfile
+    container_name: flow-hot-tier-2
+    environment:
+      FLOW_ENVIRONMENT: test
+      SHARD_ID: 1
+      FLOW_HOT_TIER_GRPC_PORT: 9091
+    ports:
+      - "9091:9091"  # gRPC
+      - "8091:8091"  # Metrics
+    volumes:
+      - ./configs:/app/configs:ro
+      - hot_tier_2_data:/tmp/snapshots
+    networks:
+      - flow-network
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+
+  # Query API Service
+  query-api:
+    build:
+      context: ./services/query-api
+      dockerfile: Dockerfile
+    container_name: flow-query-api
+    environment:
+      FLOW_ENVIRONMENT: test
+      FLOW_CONTROL_PLANE_ENDPOINT: http://control-plane:8001
+      FLOW_HOT_TIER_ENDPOINTS: hot-tier-1:9090,hot-tier-2:9091
+      FLOW_QUERY_API_CACHE_REDIS_ADDR: redis:6379
+    ports:
+      - "8081:8081"  # HTTP API
+      - "9081:9081"  # gRPC
+    depends_on:
+      - control-plane
+      - hot-tier-1
+      - hot-tier-2
+    volumes:
+      - ./configs:/app/configs:ro
+    networks:
+      - flow-network
+
+  # Stream Ingester Service
+  stream-ingester:
+    build:
+      context: ./services/stream-ingester
+      dockerfile: Dockerfile
+    container_name: flow-stream-ingester
+    environment:
+      FLOW_ENVIRONMENT: test
+      FLOW_KAFKA_BROKERS: redpanda:29092
+      FLOW_HOT_TIER_ENDPOINTS: hot-tier-1:9090,hot-tier-2:9091
+      FLOW_STREAM_INGESTER_CONSUMER_GROUP: ingester-test
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      hot-tier-1:
+        condition: service_started
+      hot-tier-2:
+        condition: service_started
+    volumes:
+      - ./configs:/app/configs:ro
+    networks:
+      - flow-network
+
+  # Prometheus for metrics
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: flow-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infrastructure/docker/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=7d'
+    networks:
+      - flow-network
+
+  # Grafana for visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: flow-grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: false
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - flow-network
+
+volumes:
+  postgres_data:
+  redis_data:
+  redpanda_data:
+  hot_tier_1_data:
+  hot_tier_2_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  flow-network:
+    driver: bridge

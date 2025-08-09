@@ -1,0 +1,204 @@
+syntax = "proto3";
+
+package truenow.query;
+option go_package = "github.com/Milad-Afdasta/TrueNow/proto/query;query";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+
+// QueryService handles analytics queries across the hot tier
+service QueryService {
+  // Execute a query
+  rpc ExecuteQuery(QueryRequest) returns (QueryResponse);
+  
+  // Stream query results for large datasets
+  rpc StreamQuery(QueryRequest) returns (stream QueryResult);
+  
+  // Get query execution plan
+  rpc ExplainQuery(ExplainQueryRequest) returns (ExplainQueryResponse);
+  
+  // Get available tables and schemas
+  rpc GetSchema(GetSchemaRequest) returns (GetSchemaResponse);
+  
+  // Get query statistics
+  rpc GetQueryStats(GetQueryStatsRequest) returns (QueryStatsResponse);
+  
+  // Cancel a running query
+  rpc CancelQuery(CancelQueryRequest) returns (CancelQueryResponse);
+}
+
+message QueryRequest {
+  string query_id = 1;  // Client-provided unique ID
+  string namespace = 2;
+  string table = 3;
+  
+  // Time range
+  int64 start_time_ms = 4;
+  int64 end_time_ms = 5;
+  
+  // Aggregations
+  repeated Aggregation aggregations = 6;
+  
+  // Filters
+  repeated Filter filters = 7;
+  
+  // Group by
+  repeated string group_by = 8;
+  
+  // Order by
+  repeated OrderBy order_by = 9;
+  
+  // Pagination
+  int32 limit = 10;
+  int32 offset = 11;
+  
+  // Query options
+  QueryOptions options = 12;
+}
+
+message Aggregation {
+  string function = 1;  // "count", "sum", "avg", "min", "max", "p50", "p95", "p99", "unique"
+  string field = 2;
+  string alias = 3;
+}
+
+message Filter {
+  string field = 1;
+  FilterOperator operator = 2;
+  google.protobuf.Value value = 3;
+  repeated google.protobuf.Value values = 4;  // For IN operator
+}
+
+enum FilterOperator {
+  EQUALS = 0;
+  NOT_EQUALS = 1;
+  LESS_THAN = 2;
+  LESS_THAN_OR_EQUALS = 3;
+  GREATER_THAN = 4;
+  GREATER_THAN_OR_EQUALS = 5;
+  IN = 6;
+  NOT_IN = 7;
+  CONTAINS = 8;
+  NOT_CONTAINS = 9;
+  IS_NULL = 10;
+  IS_NOT_NULL = 11;
+}
+
+message OrderBy {
+  string field = 1;
+  bool descending = 2;
+}
+
+message QueryOptions {
+  bool use_cache = 1;
+  int32 timeout_seconds = 2;
+  bool approximate = 3;  // Allow approximate results for better performance
+  int32 sampling_rate = 4;  // 1-100, percentage of data to sample
+  bool include_metadata = 5;
+}
+
+message QueryResponse {
+  string query_id = 1;
+  repeated QueryResult results = 2;
+  QueryMetadata metadata = 3;
+  google.protobuf.Timestamp executed_at = 4;
+}
+
+message QueryResult {
+  map<string, google.protobuf.Value> row = 1;
+  int64 timestamp = 2;
+}
+
+message QueryMetadata {
+  int64 total_rows = 1;
+  int64 rows_scanned = 2;
+  int64 bytes_scanned = 3;
+  double execution_time_ms = 4;
+  double queue_time_ms = 5;
+  int32 shards_queried = 6;
+  bool from_cache = 7;
+  bool truncated = 8;
+  repeated string warnings = 9;
+}
+
+message ExplainQueryRequest {
+  QueryRequest query = 1;
+  bool verbose = 2;
+}
+
+message ExplainQueryResponse {
+  QueryPlan plan = 1;
+  double estimated_cost = 2;
+  int64 estimated_rows = 3;
+  repeated string optimizations = 4;
+}
+
+message QueryPlan {
+  string type = 1;  // "scan", "filter", "aggregate", "sort", "limit"
+  repeated QueryPlan children = 2;
+  map<string, string> properties = 3;
+  double estimated_cost = 4;
+}
+
+message GetSchemaRequest {
+  string namespace = 1;
+  string table = 2;  // Optional, if empty returns all tables
+}
+
+message GetSchemaResponse {
+  repeated TableSchema tables = 1;
+}
+
+message TableSchema {
+  string namespace = 1;
+  string table = 2;
+  repeated FieldSchema fields = 3;
+  int64 row_count = 4;
+  int64 size_bytes = 5;
+  google.protobuf.Timestamp created_at = 6;
+  google.protobuf.Timestamp updated_at = 7;
+}
+
+message FieldSchema {
+  string name = 1;
+  string type = 2;  // "string", "int64", "float64", "bool", "timestamp"
+  bool nullable = 3;
+  bool indexed = 4;
+  map<string, string> properties = 5;
+}
+
+message GetQueryStatsRequest {
+  int32 window_seconds = 1;
+  string namespace = 2;  // Optional filter
+}
+
+message QueryStatsResponse {
+  int64 total_queries = 1;
+  int64 queries_per_second = 2;
+  double avg_latency_ms = 3;
+  double p50_latency_ms = 4;
+  double p95_latency_ms = 5;
+  double p99_latency_ms = 6;
+  int64 cache_hits = 7;
+  int64 cache_misses = 8;
+  double cache_hit_rate = 9;
+  repeated TopQuery top_queries = 10;
+  google.protobuf.Timestamp calculated_at = 11;
+}
+
+message TopQuery {
+  string query_pattern = 1;
+  int64 count = 2;
+  double avg_latency_ms = 3;
+  int64 total_rows = 4;
+}
+
+message CancelQueryRequest {
+  string query_id = 1;
+  string reason = 2;
+}
+
+message CancelQueryResponse {
+  bool success = 1;
+  string message = 2;
+}

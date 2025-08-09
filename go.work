@@ -1,0 +1,23 @@
+go 1.23.0
+
+toolchain go1.24.6
+
+use (
+	./proto/control_plane
+	./proto/gateway
+	./proto/hot_tier
+	./proto/query
+	./proto/rebalancer
+	./proto/watermark
+	./services/autoscaler
+	./services/control-plane
+	./services/exporter
+	./services/gateway
+	./services/hot-tier
+	./services/monitor
+	./services/query-api
+	./services/rebalancer
+	./services/stream-ingester
+	./services/watermark-service
+	./shared/proto
+)

@@ -1,0 +1,347 @@
+syntax = "proto3";
+
+package truenow.controlplane;
+option go_package = "github.com/Milad-Afdasta/TrueNow/proto/controlplane;controlplane";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+
+// ControlPlaneService manages metadata, schemas, epochs, and service discovery
+service ControlPlaneService {
+  // Schema management
+  rpc CreateSchema(CreateSchemaRequest) returns (CreateSchemaResponse);
+  rpc GetSchema(GetSchemaRequest) returns (GetSchemaResponse);
+  rpc UpdateSchema(UpdateSchemaRequest) returns (UpdateSchemaResponse);
+  rpc ListSchemas(ListSchemasRequest) returns (ListSchemasResponse);
+  
+  // Epoch management for atomic configuration changes
+  rpc GetCurrentEpoch(GetCurrentEpochRequest) returns (GetCurrentEpochResponse);
+  rpc ProposeEpochTransition(ProposeEpochTransitionRequest) returns (ProposeEpochTransitionResponse);
+  rpc CommitEpoch(CommitEpochRequest) returns (CommitEpochResponse);
+  
+  // Service discovery and registration
+  rpc RegisterService(RegisterServiceRequest) returns (RegisterServiceResponse);
+  rpc UnregisterService(UnregisterServiceRequest) returns (UnregisterServiceResponse);
+  rpc ListServices(ListServicesRequest) returns (ListServicesResponse);
+  rpc GetServiceEndpoints(GetServiceEndpointsRequest) returns (GetServiceEndpointsResponse);
+  
+  // Configuration management
+  rpc GetConfig(GetConfigRequest) returns (GetConfigResponse);
+  rpc UpdateConfig(UpdateConfigRequest) returns (UpdateConfigResponse);
+  
+  // Audit and compliance
+  rpc GetAuditLog(GetAuditLogRequest) returns (GetAuditLogResponse);
+  rpc RecordAuditEvent(RecordAuditEventRequest) returns (RecordAuditEventResponse);
+}
+
+// Schema Management Messages
+
+message CreateSchemaRequest {
+  string namespace = 1;
+  string table = 2;
+  repeated FieldDefinition fields = 3;
+  map<string, string> properties = 4;
+  SchemaOptions options = 5;
+}
+
+message FieldDefinition {
+  string name = 1;
+  FieldType type = 2;
+  bool required = 3;
+  bool indexed = 4;
+  google.protobuf.Value default_value = 5;
+  map<string, string> properties = 6;
+}
+
+enum FieldType {
+  STRING = 0;
+  INT32 = 1;
+  INT64 = 2;
+  FLOAT32 = 3;
+  FLOAT64 = 4;
+  BOOLEAN = 5;
+  TIMESTAMP = 6;
+  BYTES = 7;
+  JSON = 8;
+}
+
+message SchemaOptions {
+  int32 retention_days = 1;
+  int32 replication_factor = 2;
+  CompressionType compression = 3;
+  bool dedupe_enabled = 4;
+  int32 dedupe_window_minutes = 5;
+}
+
+enum CompressionType {
+  NONE = 0;
+  SNAPPY = 1;
+  LZ4 = 2;
+  ZSTD = 3;
+}
+
+message CreateSchemaResponse {
+  bool success = 1;
+  string schema_id = 2;
+  int32 version = 3;
+  string message = 4;
+}
+
+message GetSchemaRequest {
+  string namespace = 1;
+  string table = 2;
+  int32 version = 3;  // 0 for latest
+}
+
+message GetSchemaResponse {
+  Schema schema = 1;
+}
+
+message Schema {
+  string schema_id = 1;
+  string namespace = 2;
+  string table = 3;
+  int32 version = 4;
+  repeated FieldDefinition fields = 5;
+  map<string, string> properties = 6;
+  SchemaOptions options = 7;
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp updated_at = 9;
+  string created_by = 10;
+}
+
+message UpdateSchemaRequest {
+  string namespace = 1;
+  string table = 2;
+  repeated FieldDefinition fields = 3;
+  map<string, string> properties = 4;
+  bool backward_compatible = 5;
+}
+
+message UpdateSchemaResponse {
+  bool success = 1;
+  int32 new_version = 2;
+  string message = 3;
+  repeated string warnings = 4;
+}
+
+message ListSchemasRequest {
+  string namespace = 1;  // Optional filter
+  int32 limit = 2;
+  int32 offset = 3;
+}
+
+message ListSchemasResponse {
+  repeated Schema schemas = 1;
+  int32 total_count = 2;
+}
+
+// Epoch Management Messages
+
+message GetCurrentEpochRequest {
+  string namespace = 1;
+}
+
+message GetCurrentEpochResponse {
+  Epoch epoch = 1;
+}
+
+message Epoch {
+  int64 epoch_id = 1;
+  int64 version = 2;
+  EpochState state = 3;
+  map<string, ServiceConfiguration> services = 4;
+  map<string, ShardAssignment> shard_assignments = 5;
+  google.protobuf.Timestamp started_at = 6;
+  google.protobuf.Timestamp expires_at = 7;
+}
+
+enum EpochState {
+  ACTIVE = 0;
+  TRANSITIONING = 1;
+  EXPIRED = 2;
+}
+
+message ServiceConfiguration {
+  string service_type = 1;
+  int32 instance_count = 2;
+  map<string, string> config = 3;
+}
+
+message ShardAssignment {
+  string shard_id = 1;
+  repeated string node_ids = 2;
+  string primary = 3;
+  repeated string replicas = 4;
+}
+
+message ProposeEpochTransitionRequest {
+  string namespace = 1;
+  map<string, ServiceConfiguration> new_services = 2;
+  map<string, ShardAssignment> new_shard_assignments = 3;
+  string reason = 4;
+  int32 transition_duration_seconds = 5;
+}
+
+message ProposeEpochTransitionResponse {
+  bool accepted = 1;
+  int64 proposed_epoch_id = 2;
+  string message = 3;
+  repeated string validation_errors = 4;
+}
+
+message CommitEpochRequest {
+  int64 epoch_id = 1;
+  bool force = 2;
+}
+
+message CommitEpochResponse {
+  bool success = 1;
+  string message = 2;
+  google.protobuf.Timestamp committed_at = 3;
+}
+
+// Service Discovery Messages
+
+message RegisterServiceRequest {
+  string service_id = 1;
+  string service_type = 2;
+  string host = 3;
+  int32 port = 4;
+  map<string, string> metadata = 5;
+  ServiceHealth health = 6;
+}
+
+message ServiceHealth {
+  HealthStatus status = 1;
+  string message = 2;
+  google.protobuf.Timestamp last_check = 3;
+}
+
+enum HealthStatus {
+  HEALTHY = 0;
+  DEGRADED = 1;
+  UNHEALTHY = 2;
+  UNKNOWN = 3;
+}
+
+message RegisterServiceResponse {
+  bool success = 1;
+  string message = 2;
+  int32 ttl_seconds = 3;
+}
+
+message UnregisterServiceRequest {
+  string service_id = 1;
+  string reason = 2;
+}
+
+message UnregisterServiceResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message ListServicesRequest {
+  string service_type = 1;  // Optional filter
+  HealthStatus health_filter = 2;
+  int32 limit = 3;
+  int32 offset = 4;
+}
+
+message ListServicesResponse {
+  repeated ServiceInstance services = 1;
+  int32 total_count = 2;
+}
+
+message ServiceInstance {
+  string service_id = 1;
+  string service_type = 2;
+  string host = 3;
+  int32 port = 4;
+  map<string, string> metadata = 5;
+  ServiceHealth health = 6;
+  google.protobuf.Timestamp registered_at = 7;
+  google.protobuf.Timestamp last_heartbeat = 8;
+}
+
+message GetServiceEndpointsRequest {
+  string service_type = 1;
+  string namespace = 2;
+  bool healthy_only = 3;
+}
+
+message GetServiceEndpointsResponse {
+  repeated Endpoint endpoints = 1;
+}
+
+message Endpoint {
+  string service_id = 1;
+  string url = 2;
+  map<string, string> metadata = 3;
+  double weight = 4;  // For weighted load balancing
+  ServiceHealth health = 5;
+}
+
+// Configuration Management Messages
+
+message GetConfigRequest {
+  string namespace = 1;
+  string service_type = 2;
+  string key = 3;  // Optional, get specific key
+}
+
+message GetConfigResponse {
+  map<string, google.protobuf.Value> config = 1;
+  int32 version = 2;
+  google.protobuf.Timestamp updated_at = 3;
+}
+
+message UpdateConfigRequest {
+  string namespace = 1;
+  string service_type = 2;
+  map<string, google.protobuf.Value> config = 3;
+  string reason = 4;
+}
+
+message UpdateConfigResponse {
+  bool success = 1;
+  int32 new_version = 2;
+  string message = 3;
+}
+
+// Audit Messages
+
+message GetAuditLogRequest {
+  int64 start_time = 1;
+  int64 end_time = 2;
+  string user = 3;  // Optional filter
+  string action = 4;  // Optional filter
+  int32 limit = 5;
+  int32 offset = 6;
+}
+
+message GetAuditLogResponse {
+  repeated AuditEvent events = 1;
+  int32 total_count = 2;
+}
+
+message AuditEvent {
+  string event_id = 1;
+  string user = 2;
+  string action = 3;
+  string resource = 4;
+  map<string, string> details = 5;
+  string ip_address = 6;
+  google.protobuf.Timestamp timestamp = 7;
+  bool success = 8;
+  string error_message = 9;
+}
+
+message RecordAuditEventRequest {
+  AuditEvent event = 1;
+}
+
+message RecordAuditEventResponse {
+  bool success = 1;
+  string event_id = 2;
+}

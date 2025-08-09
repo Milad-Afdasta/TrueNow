@@ -1,0 +1,226 @@
+syntax = "proto3";
+
+package truenow.rebalancer;
+option go_package = "github.com/Milad-Afdasta/TrueNow/proto/rebalancer;rebalancer";
+
+import "google/protobuf/timestamp.proto";
+
+// RebalancerService manages load distribution at 1B QPS scale
+service RebalancerService {
+  // Get current shard assignments
+  rpc GetShardAssignments(GetShardAssignmentsRequest) returns (ShardAssignmentsResponse);
+  
+  // Stream shard assignment updates in real-time
+  rpc StreamShardUpdates(StreamShardUpdatesRequest) returns (stream ShardUpdate);
+  
+  // Get load distribution metrics
+  rpc GetLoadDistribution(GetLoadDistributionRequest) returns (LoadDistributionResponse);
+  
+  // Report load from a shard (batch for efficiency)
+  rpc BatchReportLoad(BatchReportLoadRequest) returns (BatchReportLoadResponse);
+  
+  // Get hotspot detection results
+  rpc GetHotspots(GetHotspotsRequest) returns (HotspotsResponse);
+  
+  // Trigger manual rebalancing
+  rpc TriggerRebalance(TriggerRebalanceRequest) returns (TriggerRebalanceResponse);
+  
+  // Get rebalancing history
+  rpc GetRebalanceHistory(GetRebalanceHistoryRequest) returns (RebalanceHistoryResponse);
+}
+
+message GetShardAssignmentsRequest {
+  string namespace = 1;
+  string table = 2;
+  repeated string services = 3;  // Filter by services
+}
+
+message ShardAssignmentsResponse {
+  map<string, ShardAssignment> assignments = 1;  // key: shard_id
+  int64 current_epoch = 2;
+  google.protobuf.Timestamp last_update = 3;
+}
+
+message ShardAssignment {
+  string shard_id = 1;
+  string primary_owner = 2;
+  repeated string replicas = 3;
+  int32 virtual_shards = 4;  // Number of virtual shards mapped
+  double load_score = 5;  // Current load on this shard
+  ShardState state = 6;
+  map<string, string> metadata = 7;
+}
+
+enum ShardState {
+  ACTIVE = 0;
+  MIGRATING = 1;
+  SPLITTING = 2;
+  MERGING = 3;
+  INACTIVE = 4;
+}
+
+message StreamShardUpdatesRequest {
+  repeated string namespaces = 1;
+  repeated string tables = 2;
+  int32 interval_ms = 3;  // Min 100ms
+}
+
+message ShardUpdate {
+  oneof update {
+    ShardAssignment assignment_change = 1;
+    ShardMigration migration_event = 2;
+    LoadAlert load_alert = 3;
+  }
+  google.protobuf.Timestamp timestamp = 4;
+}
+
+message ShardMigration {
+  string shard_id = 1;
+  string from_node = 2;
+  string to_node = 3;
+  MigrationReason reason = 4;
+  double progress = 5;  // 0-1
+  google.protobuf.Timestamp started_at = 6;
+}
+
+enum MigrationReason {
+  HOTSPOT_MITIGATION = 0;
+  NODE_FAILURE = 1;
+  SCALE_UP = 2;
+  SCALE_DOWN = 3;
+  MANUAL_REBALANCE = 4;
+}
+
+message LoadAlert {
+  string node_id = 1;
+  AlertType type = 2;
+  double current_load = 3;
+  double threshold = 4;
+  string message = 5;
+}
+
+enum AlertType {
+  HIGH_LOAD = 0;
+  UNEVEN_DISTRIBUTION = 1;
+  HOTSPOT_DETECTED = 2;
+  CAPACITY_WARNING = 3;
+}
+
+message GetLoadDistributionRequest {
+  string namespace = 1;
+  string table = 2;
+}
+
+message LoadDistributionResponse {
+  map<string, NodeLoad> node_loads = 1;  // key: node_id
+  double gini_coefficient = 2;  // 0=perfect equality, 1=perfect inequality
+  double p50_load = 3;
+  double p95_load = 4;
+  double p99_load = 5;
+  int32 total_shards = 6;
+  int32 total_virtual_shards = 7;
+  google.protobuf.Timestamp calculated_at = 8;
+}
+
+message NodeLoad {
+  string node_id = 1;
+  double cpu_usage = 2;  // 0-100
+  double memory_usage = 3;  // 0-100
+  double request_rate = 4;  // requests per second
+  int32 shard_count = 5;
+  int32 virtual_shard_count = 6;
+  repeated string hot_keys = 7;  // Top hot keys on this node
+  google.protobuf.Timestamp last_report = 8;
+}
+
+message BatchReportLoadRequest {
+  repeated LoadReport reports = 1;
+}
+
+message LoadReport {
+  string node_id = 1;
+  string shard_id = 2;
+  double cpu_usage = 3;
+  double memory_usage = 4;
+  double request_rate = 5;
+  map<string, int64> key_frequencies = 6;  // For hotspot detection
+  google.protobuf.Timestamp timestamp = 7;
+}
+
+message BatchReportLoadResponse {
+  int32 accepted = 1;
+  int32 rejected = 2;
+  repeated string errors = 3;
+}
+
+message GetHotspotsRequest {
+  double threshold = 1;  // Load threshold for hotspot detection
+  int32 limit = 2;  // Max hotspots to return
+}
+
+message HotspotsResponse {
+  repeated Hotspot hotspots = 1;
+  double avg_load = 2;
+  google.protobuf.Timestamp detected_at = 3;
+}
+
+message Hotspot {
+  string node_id = 1;
+  string shard_id = 2;
+  double load_score = 3;
+  double deviation_from_mean = 4;  // How many std devs from mean
+  repeated string hot_keys = 5;
+  MitigationStrategy suggested_strategy = 6;
+}
+
+enum MitigationStrategy {
+  NONE = 0;
+  SPLIT_SHARD = 1;
+  MIGRATE_SHARD = 2;
+  ADD_REPLICA = 3;
+  RATE_LIMIT = 4;
+  CACHE_HOT_KEYS = 5;
+}
+
+message TriggerRebalanceRequest {
+  string reason = 1;
+  RebalanceStrategy strategy = 2;
+  map<string, string> parameters = 3;
+}
+
+enum RebalanceStrategy {
+  AUTOMATIC = 0;
+  MINIMIZE_MOVEMENT = 1;  // Move minimum shards
+  OPTIMIZE_DISTRIBUTION = 2;  // Achieve perfect balance
+  HOTSPOT_FOCUSED = 3;  // Only fix hotspots
+}
+
+message TriggerRebalanceResponse {
+  bool success = 1;
+  string rebalance_id = 2;
+  int32 shards_to_move = 3;
+  double estimated_duration_seconds = 4;
+  string message = 5;
+}
+
+message GetRebalanceHistoryRequest {
+  int32 limit = 1;
+  int64 since_timestamp = 2;
+}
+
+message RebalanceHistoryResponse {
+  repeated RebalanceEvent events = 1;
+}
+
+message RebalanceEvent {
+  string rebalance_id = 1;
+  RebalanceStrategy strategy = 2;
+  string trigger_reason = 3;
+  int32 shards_moved = 4;
+  double duration_seconds = 5;
+  double gini_before = 6;
+  double gini_after = 7;
+  bool success = 8;
+  google.protobuf.Timestamp started_at = 9;
+  google.protobuf.Timestamp completed_at = 10;
+}

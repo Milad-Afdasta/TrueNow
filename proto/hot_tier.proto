@@ -1,0 +1,121 @@
+syntax = "proto3";
+
+package hottier;
+option go_package = "github.com/Milad-Afdasta/TrueNow/shared/proto/pb/hottier";
+
+import "google/protobuf/timestamp.proto";
+
+// HotTier service provides real-time aggregation and query capabilities
+service HotTier {
+  // Apply a batch of events to the hot tier
+  rpc ApplyBatch(ApplyBatchRequest) returns (ApplyBatchResponse);
+  
+  // Query aggregated data
+  rpc Query(QueryRequest) returns (QueryResponse);
+  
+  // Get statistics about the hot tier
+  rpc GetStats(GetStatsRequest) returns (GetStatsResponse);
+}
+
+// Record represents a single event/record
+message Record {
+  string event_id = 1;
+  int64 event_time_us = 2; // microseconds
+  string group_key = 3;
+  repeated double metrics = 4;
+  int32 revision = 5;
+  map<string, string> dimensions = 6;
+}
+
+// Request to apply a batch of records
+message ApplyBatchRequest {
+  repeated Record records = 1;
+  int64 epoch = 2;
+  string namespace = 3;
+  string table = 4;
+}
+
+// Response from applying a batch
+message ApplyBatchResponse {
+  int32 applied_count = 1;
+  int32 deduped_count = 2;
+  int32 rejected_count = 3;
+  int64 current_epoch = 4;
+  int64 watermark_us = 5; // microseconds
+  int32 processing_time_us = 6; // microseconds
+}
+
+// Query request
+message QueryRequest {
+  int64 start_us = 1; // microseconds
+  int64 end_us = 2; // microseconds
+  string namespace = 3;
+  string table = 4;
+  string group_by = 5;
+  repeated string filters = 6;
+  repeated string metrics = 7;
+  bool include_uniques = 8;
+  bool include_percentiles = 9;
+}
+
+// Aggregated result
+message AggregateResult {
+  int64 timestamp_us = 1; // microseconds
+  string group_key = 2;
+  double sum = 3;
+  int64 count = 4;
+  double min = 5;
+  double max = 6;
+  double avg = 7;
+  
+  // Optional sketch results
+  int64 unique_count = 8;
+  double p50 = 9;
+  double p95 = 10;
+  double p99 = 11;
+  repeated string top_k = 12;
+}
+
+// Query response
+message QueryResponse {
+  repeated AggregateResult results = 1;
+  int64 watermark_us = 2; // microseconds
+  string error = 3;
+}
+
+// Request for statistics
+message GetStatsRequest {
+  bool include_buffer_stats = 1;
+  bool include_memory_stats = 2;
+}
+
+// Buffer statistics
+message BufferStats {
+  int64 slots_used = 1;
+  int64 total_slots = 2;
+  int64 writes_total = 3;
+  int64 reads_total = 4;
+}
+
+// Memory statistics
+message MemoryStats {
+  int64 alloc_bytes = 1;
+  int64 sys_bytes = 2;
+  int32 gc_runs = 3;
+  int64 heap_objects = 4;
+}
+
+// Statistics response
+message GetStatsResponse {
+  int64 events_processed = 1;
+  int64 events_deduped = 2;
+  int64 bytes_processed = 3;
+  int32 shard_id = 4;
+  int32 numa_node = 5;
+  
+  BufferStats buffer_1s = 6;
+  BufferStats buffer_10s = 7;
+  BufferStats buffer_1m = 8;
+  
+  MemoryStats memory = 9;
+}

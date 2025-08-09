@@ -1,0 +1,173 @@
+# TrueNow Analytics Platform - Services Build Makefile
+# This Makefile builds all services into the build/ directory
+
+.PHONY: all clean build-all help
+
+# Build output directory
+BUILD_DIR := build
+
+# Go build flags
+GO_FLAGS := -ldflags="-s -w" # Strip debug info for smaller binaries
+GO_ENV := GOWORK=off CGO_ENABLED=0 # Disable workspace and CGO for static binaries
+
+# Service list
+SERVICES := gateway control-plane hot-tier query-api monitor autoscaler stream-ingester watermark-service rebalancer
+
+# Default target
+all: build-all
+
+help: ## Show this help message
+	@echo 'Usage: make [target]'
+	@echo ''
+	@echo 'Targets:'
+	@awk 'BEGIN {FS = ":.*##"; printf "\n"} /^[a-zA-Z_-]+:.*?##/ { printf "  %-20s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
+
+$(BUILD_DIR): ## Create build directory
+	@mkdir -p $(BUILD_DIR)
+
+clean: ## Clean all built binaries
+	@echo "🧹 Cleaning build directory..."
+	@rm -rf $(BUILD_DIR)
+	@echo "✅ Clean complete"
+
+build-all: $(BUILD_DIR) ## Build all services
+	@echo "🔨 Building all services..."
+	@echo "Building gateway..."
+	@cd services/gateway && $(GO_ENV) go build $(GO_FLAGS) -o ../../$(BUILD_DIR)/gateway cmd/main.go
+	@echo "  ✓ gateway built"
+	@echo "Building control-plane..."
+	@cd services/control-plane && $(GO_ENV) go build $(GO_FLAGS) -o ../../$(BUILD_DIR)/control-plane cmd/main.go
+	@echo "  ✓ control-plane built"
+	@echo "Building hot-tier..."
+	@cd services/hot-tier && $(GO_ENV) go build $(GO_FLAGS) -o ../../$(BUILD_DIR)/hot-tier cmd/main.go
+	@echo "  ✓ hot-tier built"
+	@echo "Building query-api..."
+	@cd services/query-api && $(GO_ENV) go build $(GO_FLAGS) -o ../../$(BUILD_DIR)/query-api cmd/main.go
+	@echo "  ✓ query-api built"
+	@echo "Building monitor..."
+	@cd services/monitor && $(GO_ENV) go build $(GO_FLAGS) -o ../../$(BUILD_DIR)/monitor main.go
+	@echo "  ✓ monitor built"
+	@echo "Building autoscaler..."
+	@cd services/autoscaler && $(GO_ENV) go build $(GO_FLAGS) -o ../../$(BUILD_DIR)/autoscaler cmd/autoscaler/main.go
+	@echo "  ✓ autoscaler built"
+	@echo "Building stream-ingester..."
+	@cd services/stream-ingester && $(GO_ENV) go build $(GO_FLAGS) -o ../../$(BUILD_DIR)/stream-ingester cmd/main.go
+	@echo "  ✓ stream-ingester built"
+	@echo "Building watermark-service..."
+	@cd services/watermark-service && $(GO_ENV) go build $(GO_FLAGS) -o ../../$(BUILD_DIR)/watermark-service cmd/main.go
+	@echo "  ✓ watermark-service built"
+	@echo "Building rebalancer..."
+	@cd services/rebalancer && $(GO_ENV) go build $(GO_FLAGS) -o ../../$(BUILD_DIR)/rebalancer cmd/main.go
+	@echo "  ✓ rebalancer built"
+	@echo "✅ All services built successfully!"
+	@echo ""
+	@echo "📦 Build artifacts:"
+	@ls -lh $(BUILD_DIR)/ | grep -v "^total"
+
+build-gateway: $(BUILD_DIR) ## Build gateway service
+	@echo "Building gateway..."
+	@cd services/gateway && $(GO_ENV) go build $(GO_FLAGS) -o ../../$(BUILD_DIR)/gateway cmd/main.go
+	@echo "  ✓ gateway built"
+
+build-control-plane: $(BUILD_DIR) ## Build control-plane service
+	@echo "Building control-plane..."
+	@cd services/control-plane && $(GO_ENV) go build $(GO_FLAGS) -o ../../$(BUILD_DIR)/control-plane cmd/main.go
+	@echo "  ✓ control-plane built"
+
+build-hot-tier: $(BUILD_DIR) ## Build hot-tier service
+	@echo "Building hot-tier..."
+	@cd services/hot-tier && $(GO_ENV) go build $(GO_FLAGS) -o ../../$(BUILD_DIR)/hot-tier cmd/main.go
+	@echo "  ✓ hot-tier built"
+
+build-query-api: $(BUILD_DIR) ## Build query-api service
+	@echo "Building query-api..."
+	@cd services/query-api && $(GO_ENV) go build $(GO_FLAGS) -o ../../$(BUILD_DIR)/query-api cmd/main.go
+	@echo "  ✓ query-api built"
+
+build-monitor: $(BUILD_DIR) ## Build monitor service
+	@echo "Building monitor..."
+	@cd services/monitor && $(GO_ENV) go build $(GO_FLAGS) -o ../../$(BUILD_DIR)/monitor main.go
+	@echo "  ✓ monitor built"
+
+build-autoscaler: $(BUILD_DIR) ## Build autoscaler service
+	@echo "Building autoscaler..."
+	@cd services/autoscaler && $(GO_ENV) go build $(GO_FLAGS) -o ../../$(BUILD_DIR)/autoscaler cmd/autoscaler/main.go
+	@echo "  ✓ autoscaler built"
+
+build-stream-ingester: $(BUILD_DIR) ## Build stream-ingester service
+	@echo "Building stream-ingester..."
+	@cd services/stream-ingester && $(GO_ENV) go build $(GO_FLAGS) -o ../../$(BUILD_DIR)/stream-ingester cmd/main.go
+	@echo "  ✓ stream-ingester built"
+
+build-watermark-service: $(BUILD_DIR) ## Build watermark-service
+	@echo "Building watermark-service..."
+	@cd services/watermark-service && $(GO_ENV) go build $(GO_FLAGS) -o ../../$(BUILD_DIR)/watermark-service cmd/main.go
+	@echo "  ✓ watermark-service built"
+
+build-rebalancer: $(BUILD_DIR) ## Build rebalancer service
+	@echo "Building rebalancer..."
+	@cd services/rebalancer && $(GO_ENV) go build $(GO_FLAGS) -o ../../$(BUILD_DIR)/rebalancer cmd/main.go
+	@echo "  ✓ rebalancer built"
+
+# Individual rebuild targets (force rebuild even if up to date)
+rebuild-%: clean build-% ## Force rebuild a specific service
+	@echo "✅ Rebuilt $*"
+
+# Development builds (with debug symbols)
+dev-build-%: $(BUILD_DIR) ## Build service with debug symbols
+	@echo "Building $* (debug mode)..."
+	@service=$*; \
+	if [ "$$service" = "monitor" ]; then \
+		cd services/$$service && $(GO_ENV) go build -o ../../$(BUILD_DIR)/$$service-debug main.go; \
+	elif [ "$$service" = "autoscaler" ]; then \
+		cd services/$$service && $(GO_ENV) go build -o ../../$(BUILD_DIR)/$$service-debug cmd/autoscaler/main.go; \
+	else \
+		cd services/$$service && $(GO_ENV) go build -o ../../$(BUILD_DIR)/$$service-debug cmd/main.go; \
+	fi
+	@echo "  ✓ $*-debug built"
+
+# Run targets (build and run)
+run-%: build-% ## Build and run a service
+	@echo "🚀 Running $*..."
+	@./$(BUILD_DIR)/$*
+
+# Test build (verify all services compile)
+test-build: ## Test that all services compile without saving binaries
+	@echo "🧪 Testing compilation of all services..."
+	@failed=0; \
+	for service in $(SERVICES); do \
+		echo -n "  Testing $$service... "; \
+		if [ "$$service" = "monitor" ]; then \
+			cd services/$$service && $(GO_ENV) go build -o /dev/null main.go 2>/dev/null && echo "✓" || (echo "✗" && failed=1); \
+		elif [ "$$service" = "autoscaler" ]; then \
+			cd services/$$service && $(GO_ENV) go build -o /dev/null cmd/autoscaler/main.go 2>/dev/null && echo "✓" || (echo "✗" && failed=1); \
+		else \
+			cd services/$$service && $(GO_ENV) go build -o /dev/null cmd/main.go 2>/dev/null && echo "✓" || (echo "✗" && failed=1); \
+		fi; \
+		cd ../..; \
+	done; \
+	if [ $$failed -eq 0 ]; then \
+		echo "✅ All services compile successfully!"; \
+	else \
+		echo "❌ Some services failed to compile"; \
+		exit 1; \
+	fi
+
+# Check binary sizes
+sizes: ## Show size of all built binaries
+	@echo "📊 Binary sizes:"
+	@if [ -d $(BUILD_DIR) ]; then \
+		ls -lhS $(BUILD_DIR)/ | grep -v "^total" | awk '{printf "  %-20s %s\n", $$9, $$5}'; \
+		echo ""; \
+		echo "  Total: $$(du -sh $(BUILD_DIR) | cut -f1)"; \
+	else \
+		echo "  No binaries built yet. Run 'make build-all' first."; \
+	fi
+
+# Package all binaries
+package: build-all ## Create tarball of all binaries
+	@echo "📦 Packaging binaries..."
+	@tar czf flow-services-$(shell date +%Y%m%d).tar.gz -C $(BUILD_DIR) .
+	@echo "✅ Package created: flow-services-$(shell date +%Y%m%d).tar.gz"
+
+.DEFAULT_GOAL := help

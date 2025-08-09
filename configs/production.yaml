@@ -1,0 +1,277 @@
+# Production Configuration for Real-Time Analytics Platform
+# This configuration is designed for 1B QPS at scale
+
+environment: production
+
+# Control Plane Configuration (HA setup)
+control_plane:
+  http_port: 8001
+  grpc_port: 9001
+  database:
+    host: postgres-primary.prod.internal
+    port: 5432
+    name: analytics
+    user: analytics_prod
+    password: "${DB_PASSWORD}"
+    max_connections: 200
+    read_replicas:
+      - postgres-replica-1.prod.internal:5432
+      - postgres-replica-2.prod.internal:5432
+      - postgres-replica-3.prod.internal:5432
+  cache:
+    enabled: true
+    redis_addr: redis-cluster.prod.internal:6379
+    ttl: 5m
+    max_size: 10GB
+  audit:
+    enabled: true
+    retention_days: 90
+    async_write: true
+
+# Gateway Configuration (Hyperscale)
+gateway:
+  http_port: 8080
+  grpc_port: 9080
+  max_connections: 256000      # 256K concurrent connections
+  max_request_size: 10MB       # 10MB max request
+  num_instances: 10000         # 10K gateway nodes for 1B QPS
+  
+  kafka:
+    brokers:
+      - kafka-1.prod.internal:9092
+      - kafka-2.prod.internal:9092
+      - kafka-3.prod.internal:9092
+      - kafka-4.prod.internal:9092
+      - kafka-5.prod.internal:9092
+    num_partitions: 100000     # 100K partitions for massive parallelism
+    replication_factor: 3      # Triple replication for durability
+    producer:
+      batch_size: 10000        # Large batches for throughput
+      linger_ms: 10            # Low latency
+      compression: zstd        # Best compression ratio
+      acks: all                # Full durability
+      idempotent: true         # Exactly-once semantics
+      max_in_flight: 5         # Parallel requests
+      buffer_memory: 134217728 # 128MB buffer
+      
+  rate_limit:
+    enabled: true
+    global_qps: 1000000000     # 1B QPS global limit
+    per_tenant_qps: 10000000   # 10M QPS per tenant
+    burst_multiplier: 2        # Allow 2x burst
+    
+  validation:
+    strict_mode: true          # Strict validation in production
+    cache_schemas: true
+    schema_cache_ttl: 5m
+    parallel_validation: true
+    num_validators: 16         # 16 parallel validators
+
+# Hot Tier Configuration (Memory-optimized)
+hot_tier:
+  grpc_port: 9090
+  num_shards: 50000            # 50K shards for distribution
+  num_instances: 50000         # 50K hot-tier nodes
+  
+  ring_buffer:
+    size_1s: 86400             # 24 hours at 1-second resolution
+    size_10s: 8640             # 24 hours at 10-second resolution
+    size_1m: 1440              # 24 hours at 1-minute resolution
+    
+  memory:
+    max_gb_per_shard: 64       # 64GB RAM per shard
+    max_groups_per_slot: 100000 # 100K unique groups
+    use_hugepages: true        # 2MB huge pages for TLB efficiency
+    numa_aware: true           # NUMA optimization
+    
+  dedup:
+    enabled: true
+    ttl: 24h                   # 24 hour deduplication window
+    use_bloom_filter: true     # Bloom filter for fast negative checks
+    bloom_filter_size: 100MB   # 100MB bloom filter
+    
+  sketch:
+    hll_precision: 14          # 16KB for 0.8% error
+    tdigest_compression: 100   # High accuracy
+    topk_size: 100             # Top 100 items
+    
+  snapshot:
+    enabled: true
+    interval: 5m               # Snapshot every 5 minutes
+    storage_path: s3://flow-snapshots/hot-tier
+    compression: true
+    parallel_upload: true
+    retention_days: 7
+
+# Stream Ingester Configuration (High-throughput)
+stream_ingester:
+  num_workers: 1000            # 1000 parallel workers
+  batch_size: 10000            # Large batches
+  consumer_group: ingester-prod
+  num_instances: 1000          # 1000 ingester instances
+  
+  kafka_consumer:
+    fetch_min_bytes: 1048576   # 1MB minimum fetch
+    fetch_max_wait: 100        # 100ms max wait
+    max_partition_fetch_bytes: 10485760 # 10MB per partition
+    session_timeout: 30s
+    rebalance_timeout: 60s
+    
+  processing:
+    use_vectorization: true    # SIMD processing
+    batch_aggregation: true
+    parallel_dedup: true
+    num_dedup_workers: 32
+
+# Query API Configuration (Optimized for analytics)
+query_api:
+  http_port: 8081
+  grpc_port: 9081
+  num_instances: 5000          # 5000 query nodes
+  
+  cache:
+    enabled: true
+    ttl: 60s                   # 1 minute cache
+    max_size: 100GB            # 100GB cache per node
+    cache_type: redis-cluster  # Distributed cache
+    
+  query_limits:
+    max_time_range: 24h        # 24 hour maximum range
+    max_groups: 50000          # 50K groups maximum
+    timeout: 30s               # 30 second timeout
+    max_concurrent_queries: 1000
+    
+  optimization:
+    use_query_planner: true
+    enable_predicate_pushdown: true
+    enable_projection_pushdown: true
+    use_columnar_execution: true
+    parallel_execution_threads: 32
+
+# Kafka/Redpanda Configuration (Massive scale)
+topics:
+  prefix: "prod"
+  num_partitions: 100000       # 100K partitions
+  replication_factor: 3        # Triple replication
+  retention_hours: 72          # 3 days retention
+  segment_ms: 600000           # 10 minute segments
+  compression_type: zstd
+  min_in_sync_replicas: 2
+  unclean_leader_election: false
+  
+  partition_assignment:
+    strategy: rack-aware       # Rack-aware partition assignment
+    rebalance_timeout: 300s
+    
+# Network Configuration
+network:
+  use_sriov: true              # SR-IOV for network acceleration
+  use_dpdk: true               # DPDK for kernel bypass
+  use_rdma: true               # RDMA for low-latency
+  jumbo_frames: true           # 9000 MTU
+  tcp_nodelay: true            # Disable Nagle's algorithm
+  socket_buffer_size: 4194304  # 4MB socket buffers
+
+# Storage Configuration  
+storage:
+  hot_tier:
+    type: nvme                 # NVMe SSDs for hot tier
+    raid_level: 10             # RAID 10 for performance
+    iops_limit: 1000000        # 1M IOPS
+    
+  snapshots:
+    type: s3                   # S3-compatible object storage
+    bucket: flow-prod-snapshots
+    storage_class: STANDARD_IA
+    
+  archive:
+    type: glacier              # AWS Glacier for long-term
+    transition_days: 30
+
+# Observability Configuration
+observability:
+  metrics:
+    enabled: true
+    port: 8090
+    path: /metrics
+    scrape_interval: 10s
+    retention: 30d
+    
+  tracing:
+    enabled: true
+    jaeger_endpoint: jaeger-collector.prod.internal:14268
+    sample_rate: 0.001         # 0.1% sampling at scale
+    
+  logging:
+    level: warn                # Only warnings and errors
+    format: json
+    output: fluentd            # Ship to centralized logging
+    buffer_size: 100MB
+    
+  monitoring:
+    enable_profiling: true     # Continuous profiling
+    enable_ebpf: true          # eBPF for kernel observability
+    enable_hardware_metrics: true # CPU, memory, network stats
+
+# Resource Allocation (Production scale)
+resources:
+  control_plane:
+    cpu: 16                    # 16 cores
+    memory: 32Gi               # 32GB RAM
+    storage: 1Ti               # 1TB storage
+    
+  gateway:
+    cpu: 32                    # 32 cores
+    memory: 64Gi               # 64GB RAM
+    network: 100Gbps           # 100Gbps network
+    
+  hot_tier:
+    cpu: 64                    # 64 cores
+    memory: 256Gi              # 256GB RAM
+    storage: 10Ti              # 10TB NVMe
+    hugepages: 128Gi           # 128GB huge pages
+    
+  query_api:
+    cpu: 32                    # 32 cores
+    memory: 128Gi              # 128GB RAM
+    cache: 1Ti                 # 1TB cache storage
+
+# High Availability Configuration
+high_availability:
+  enable_multi_region: true
+  regions:
+    - us-east-1
+    - us-west-2
+    - eu-west-1
+  replication_mode: async      # Async cross-region replication
+  failover_timeout: 30s
+  health_check_interval: 5s
+  min_healthy_instances: 0.7   # 70% instances must be healthy
+
+# Security Configuration
+security:
+  enable_tls: true
+  tls_version: "1.3"
+  cipher_suites:
+    - TLS_AES_256_GCM_SHA384
+    - TLS_CHACHA20_POLY1305_SHA256
+  enable_mtls: true            # Mutual TLS for service-to-service
+  enable_encryption_at_rest: true
+  key_rotation_days: 30
+  audit_log_encryption: true
+
+# Feature Flags
+features:
+  enable_auth: true
+  enable_tls: true
+  enable_compression: true
+  enable_dedup: true
+  enable_sketches: true
+  enable_hot_tier: true
+  enable_audit: true
+  enable_chaos_monkey: false   # Disabled in production
+  enable_debug_endpoints: false
+  enable_cost_optimization: true
+  enable_auto_scaling: true
+  enable_circuit_breaker: true
+  enable_rate_limiting: true

@@ -1,0 +1,150 @@
+syntax = "proto3";
+
+package truenow.gateway;
+option go_package = "github.com/Milad-Afdasta/TrueNow/proto/gateway;gateway";
+
+import "google/protobuf/timestamp.proto";
+
+// GatewayService handles high-throughput event ingestion at 1B QPS scale
+service GatewayService {
+  // Ingest a single event
+  rpc IngestEvent(IngestEventRequest) returns (IngestEventResponse);
+  
+  // Batch ingest for efficiency at scale
+  rpc BatchIngestEvents(BatchIngestEventsRequest) returns (BatchIngestEventsResponse);
+  
+  // Stream events for continuous ingestion
+  rpc StreamIngestEvents(stream IngestEventRequest) returns (stream IngestEventResponse);
+  
+  // Get ingestion statistics
+  rpc GetIngestionStats(GetIngestionStatsRequest) returns (IngestionStatsResponse);
+  
+  // Check service health
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+  
+  // Get rate limit status for a client
+  rpc GetRateLimitStatus(GetRateLimitStatusRequest) returns (RateLimitStatusResponse);
+}
+
+message IngestEventRequest {
+  string namespace = 1;
+  string table = 2;
+  string event_id = 3;  // For deduplication
+  bytes payload = 4;  // Raw event data
+  map<string, string> headers = 5;
+  google.protobuf.Timestamp timestamp = 6;
+  string client_id = 7;  // For rate limiting
+  int32 priority = 8;  // 0=low, 1=normal, 2=high
+}
+
+message IngestEventResponse {
+  bool success = 1;
+  string message = 2;
+  string event_id = 3;
+  int64 offset = 4;  // Kafka offset if applicable
+  google.protobuf.Timestamp ingested_at = 5;
+  BackpressureSignal backpressure = 6;
+}
+
+message BackpressureSignal {
+  bool active = 1;
+  double load_factor = 2;  // 0-1, where 1 is max load
+  int32 suggested_backoff_ms = 3;
+  string message = 4;
+}
+
+message BatchIngestEventsRequest {
+  repeated IngestEventRequest events = 1;
+  BatchOptions options = 2;
+}
+
+message BatchOptions {
+  bool atomic = 1;  // All or nothing
+  bool skip_validation = 2;  // For trusted sources
+  int32 compression = 3;  // 0=none, 1=snappy, 2=lz4
+}
+
+message BatchIngestEventsResponse {
+  int32 succeeded = 1;
+  int32 failed = 2;
+  repeated EventResult results = 3;
+  BackpressureSignal backpressure = 4;
+  google.protobuf.Timestamp completed_at = 5;
+}
+
+message EventResult {
+  string event_id = 1;
+  bool success = 2;
+  string error = 3;
+  int64 offset = 4;
+}
+
+message GetIngestionStatsRequest {
+  int32 window_seconds = 1;  // Stats window
+  repeated string namespaces = 2;  // Filter by namespace
+}
+
+message IngestionStatsResponse {
+  int64 total_events = 1;
+  int64 events_per_second = 2;
+  int64 bytes_per_second = 3;
+  int64 failed_events = 4;
+  double success_rate = 5;
+  map<string, NamespaceStats> namespace_stats = 6;
+  RateLimitStats rate_limit_stats = 7;
+  BackpressureStats backpressure_stats = 8;
+  google.protobuf.Timestamp calculated_at = 9;
+}
+
+message NamespaceStats {
+  string namespace = 1;
+  int64 events = 2;
+  int64 bytes = 3;
+  double avg_latency_ms = 4;
+  double p99_latency_ms = 5;
+}
+
+message RateLimitStats {
+  int64 total_limited = 1;
+  int64 current_qps = 2;
+  int64 max_qps = 3;
+  map<string, int64> limited_by_client = 4;
+}
+
+message BackpressureStats {
+  bool active = 1;
+  double current_load = 2;
+  int64 events_shed = 3;
+  int64 events_queued = 4;
+  double queue_utilization = 5;
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  bool healthy = 1;
+  string status = 2;  // "healthy", "degraded", "unhealthy"
+  map<string, ComponentHealth> components = 3;
+  google.protobuf.Timestamp timestamp = 4;
+}
+
+message ComponentHealth {
+  bool healthy = 1;
+  string message = 2;
+  double latency_ms = 3;
+}
+
+message GetRateLimitStatusRequest {
+  string client_id = 1;
+  string namespace = 2;
+}
+
+message RateLimitStatusResponse {
+  string client_id = 1;
+  int64 current_rate = 2;
+  int64 limit = 3;
+  int64 remaining = 4;
+  int64 reset_at = 5;  // Unix timestamp
+  bool limited = 6;
+  string tier = 7;  // "free", "standard", "premium", etc.
+}

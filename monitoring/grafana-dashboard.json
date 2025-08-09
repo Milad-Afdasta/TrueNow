@@ -1,0 +1,180 @@
+{
+  "dashboard": {
+    "title": "Real-Time Analytics Platform",
+    "panels": [
+      {
+        "title": "Request Rate",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+        "targets": [
+          {
+            "expr": "rate(flow_requests_total[1m])",
+            "legendFormat": "Total"
+          },
+          {
+            "expr": "rate(flow_requests_success_total[1m])",
+            "legendFormat": "Success"
+          },
+          {
+            "expr": "rate(flow_requests_failed_total[1m])",
+            "legendFormat": "Failed"
+          }
+        ],
+        "type": "graph"
+      },
+      {
+        "title": "Request Latency (p99)",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.99, flow_request_duration_seconds)",
+            "legendFormat": "p99"
+          },
+          {
+            "expr": "histogram_quantile(0.95, flow_request_duration_seconds)",
+            "legendFormat": "p95"
+          },
+          {
+            "expr": "histogram_quantile(0.50, flow_request_duration_seconds)",
+            "legendFormat": "p50"
+          }
+        ],
+        "type": "graph"
+      },
+      {
+        "title": "Events Throughput",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+        "targets": [
+          {
+            "expr": "rate(flow_events_ingested_total[1m])",
+            "legendFormat": "Ingested/sec"
+          },
+          {
+            "expr": "rate(flow_events_processed_total[1m])",
+            "legendFormat": "Processed/sec"
+          }
+        ],
+        "type": "graph"
+      },
+      {
+        "title": "Data Freshness",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+        "targets": [
+          {
+            "expr": "flow_watermark_lag_ms",
+            "legendFormat": "Watermark Lag"
+          },
+          {
+            "expr": "histogram_quantile(0.99, flow_data_freshness_ms)",
+            "legendFormat": "p99 Freshness"
+          }
+        ],
+        "type": "graph",
+        "yaxes": [
+          {
+            "format": "ms",
+            "label": "Milliseconds"
+          }
+        ]
+      },
+      {
+        "title": "Kafka Metrics",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+        "targets": [
+          {
+            "expr": "rate(flow_kafka_producer_sent_total[1m])",
+            "legendFormat": "Messages/sec"
+          },
+          {
+            "expr": "flow_kafka_consumer_lag",
+            "legendFormat": "Consumer Lag"
+          },
+          {
+            "expr": "rate(flow_kafka_producer_errors_total[1m])",
+            "legendFormat": "Errors/sec"
+          }
+        ],
+        "type": "graph"
+      },
+      {
+        "title": "Backpressure Status",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+        "targets": [
+          {
+            "expr": "flow_queue_depth",
+            "legendFormat": "Queue Depth"
+          },
+          {
+            "expr": "flow_queue_capacity",
+            "legendFormat": "Queue Capacity"
+          },
+          {
+            "expr": "rate(flow_shed_requests_total[1m])",
+            "legendFormat": "Shed Rate"
+          },
+          {
+            "expr": "flow_circuit_breaker_open",
+            "legendFormat": "Circuit Breaker"
+          }
+        ],
+        "type": "graph"
+      },
+      {
+        "title": "System Resources",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+        "targets": [
+          {
+            "expr": "flow_cpu_usage_percent",
+            "legendFormat": "CPU %"
+          },
+          {
+            "expr": "flow_memory_usage_percent",
+            "legendFormat": "Memory %"
+          },
+          {
+            "expr": "flow_goroutines",
+            "legendFormat": "Goroutines"
+          }
+        ],
+        "type": "graph"
+      },
+      {
+        "title": "Cache Performance",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+        "targets": [
+          {
+            "expr": "flow_cache_hit_rate",
+            "legendFormat": "Hit Rate"
+          },
+          {
+            "expr": "rate(flow_cache_evictions_total[1m])",
+            "legendFormat": "Evictions/sec"
+          },
+          {
+            "expr": "flow_cache_size",
+            "legendFormat": "Cache Size"
+          }
+        ],
+        "type": "graph"
+      },
+      {
+        "title": "Error Rate by Type",
+        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 32},
+        "targets": [
+          {
+            "expr": "rate(flow_errors_total[1m])",
+            "legendFormat": "{{type}}"
+          }
+        ],
+        "type": "graph"
+      }
+    ],
+    "refresh": "5s",
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "timepicker": {
+      "refresh_intervals": ["5s", "10s", "30s", "1m", "5m"]
+    }
+  }
+}

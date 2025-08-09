@@ -1,0 +1,156 @@
+# Base Configuration for Real-Time Analytics Platform
+# This file contains default values for local testing
+# Override with environment-specific configs for production
+
+environment: development
+
+# Control Plane Configuration
+control_plane:
+  http_port: 8001
+  grpc_port: 9001
+  database:
+    host: localhost
+    port: 5432
+    name: analytics
+    user: "${USER}"
+    password: ""
+    max_connections: 10      # 10 for test, 100+ for production
+    read_replicas: []        # Empty for test, multiple for production
+  cache:
+    enabled: true
+    redis_addr: localhost:6379
+    ttl: 30s
+  audit:
+    enabled: true
+    retention_days: 7        # 7 for test, 90+ for production
+
+# Gateway Configuration  
+gateway:
+  http_port: 8080
+  grpc_port: 9080
+  max_connections: 1000      # 1K for test, 256K for production
+  max_request_size: 1MB      # 1MB for test, 10MB for production
+  
+  kafka:
+    brokers:
+      - localhost:9092
+    num_partitions: 10       # 10 for test, 100K for production
+    replication_factor: 1    # 1 for test, 3 for production
+    producer:
+      batch_size: 100        # 100 for test, 1000 for production
+      linger_ms: 100         # 100ms for test, 10ms for production
+      compression: none      # none for test, zstd for production
+      acks: 1                # 1 for test, all for production
+      
+  rate_limit:
+    enabled: true
+    global_qps: 10000        # 10K for test, 1M+ for production
+    per_tenant_qps: 1000     # 1K for test, 100K for production
+    
+  validation:
+    strict_mode: false       # Relaxed for test
+    cache_schemas: true
+    schema_cache_ttl: 60s
+
+# Hot Tier Configuration
+hot_tier:
+  grpc_port: 9090
+  num_shards: 2              # 2 for test, 50K for production
+  
+  ring_buffer:
+    size_1s: 3600            # 1 hour for test, 86400 (24h) for production
+    size_10s: 360            # 1 hour for test, 8640 (24h) for production  
+    size_1m: 60              # 1 hour for test, 1440 (24h) for production
+    
+  memory:
+    max_gb_per_shard: 1      # 1GB for test, 64GB for production
+    max_groups_per_slot: 100 # 100 for test, 10K for production
+    
+  dedup:
+    enabled: true
+    ttl: 1h                  # 1h for test, 24h for production
+    
+  sketch:
+    hll_precision: 12        # 12 for test (4KB), 14 for production (16KB)
+    tdigest_compression: 50  # 50 for test, 100 for production
+    topk_size: 10            # 10 for test, 100 for production
+    
+  snapshot:
+    enabled: false           # Disabled for test
+    interval: 5m
+    storage_path: /tmp/snapshots
+    compression: true
+
+# Stream Ingester Configuration
+stream_ingester:
+  num_workers: 2             # 2 for test, 100+ for production
+  batch_size: 10             # 10 for test, 1000 for production
+  consumer_group: ingester-test
+  
+# Query API Configuration
+query_api:
+  http_port: 8081
+  grpc_port: 9081
+  
+  cache:
+    enabled: true
+    ttl: 10s                 # 10s for test, 60s for production
+    max_size: 100MB          # 100MB for test, 10GB for production
+    
+  query_limits:
+    max_time_range: 1h       # 1h for test, 24h for production
+    max_groups: 100          # 100 for test, 10K for production
+    timeout: 5s              # 5s for test, 30s for production
+
+# Kafka/Redpanda Topics Configuration
+topics:
+  prefix: "test"             # "test" for test, "prod" for production
+  num_partitions: 10         # 10 for test, 100K for production
+  replication_factor: 1      # 1 for test, 3 for production
+  retention_hours: 24        # 24h for test, 72h for production
+  segment_ms: 3600000        # 1 hour segments
+
+# Observability Configuration
+observability:
+  metrics:
+    enabled: true
+    port: 8090
+    path: /metrics
+    
+  tracing:
+    enabled: false           # Disabled for test
+    jaeger_endpoint: http://localhost:14268/api/traces
+    sample_rate: 0.001       # 0.1% sampling
+    
+  logging:
+    level: info              # info for test, warn for production
+    format: json
+    output: stdout
+
+# Resource Limits (for container deployment)
+resources:
+  control_plane:
+    cpu: 1                   # 1 core for test, 8+ for production
+    memory: 512Mi            # 512MB for test, 4GB for production
+    
+  gateway:
+    cpu: 2                   # 2 cores for test, 32+ for production
+    memory: 1Gi              # 1GB for test, 64GB for production
+    
+  hot_tier:
+    cpu: 2                   # 2 cores for test, 32+ for production
+    memory: 2Gi              # 2GB for test, 128GB for production
+    
+  query_api:
+    cpu: 1                   # 1 core for test, 16+ for production
+    memory: 512Mi            # 512MB for test, 8GB for production
+
+# Feature Flags
+features:
+  enable_auth: false         # Disabled for test
+  enable_tls: false          # Disabled for test
+  enable_compression: false  # Disabled for test
+  enable_dedup: true
+  enable_sketches: true
+  enable_hot_tier: true
+  enable_audit: true

@@ -1,0 +1,82 @@
+services:
+  # PostgreSQL for Control Plane metadata
+  postgres:
+    image: postgres:15-alpine
+    container_name: flow-postgres
+    environment:
+      POSTGRES_USER: analytics
+      POSTGRES_PASSWORD: analytics123
+      POSTGRES_DB: analytics
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U analytics"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for caching
+  redis:
+    image: redis:7-alpine
+    container_name: flow-redis
+    ports:
+      - "6380:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redpanda (Kafka-compatible) for event streaming
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:latest
+    container_name: flow-redpanda
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp 2
+      - --memory 1G
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
+      - --pandaproxy-addr internal://0.0.0.0:8082,external://0.0.0.0:18082
+      - --advertise-pandaproxy-addr internal://redpanda:8082,external://localhost:18082
+      - --schema-registry-addr internal://0.0.0.0:8081,external://0.0.0.0:18081
+      - --rpc-addr redpanda:33145
+      - --advertise-rpc-addr redpanda:33145
+    ports:
+      - "18081:18081"  # Schema Registry
+      - "18082:18082"  # Pandaproxy
+      - "19092:19092"  # Kafka API
+      - "9092:9092"    # Internal Kafka (for local services)
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9644/v1/status/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Optional: Redpanda Console for Kafka management
+  # Commented out to avoid port conflicts - uncomment if needed
+  # redpanda-console:
+  #   image: docker.redpanda.com/redpandadata/console:latest
+  #   container_name: flow-redpanda-console
+  #   depends_on:
+  #     - redpanda
+  #   ports:
+  #     - "8090:8080"
+  #   environment:
+  #     CONFIG_FILEPATH: /etc/redpanda-console/config.yml
+  #   volumes:
+  #     - ./infrastructure/docker/redpanda-console-config.yml:/etc/redpanda-console/config.yml:ro
+
+volumes:
+  postgres-data:
+  redis-data:
+  redpanda-data:

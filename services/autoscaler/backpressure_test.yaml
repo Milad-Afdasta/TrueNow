@@ -1,0 +1,68 @@
+evaluation_interval: 2s
+metrics_window: 30s
+use_mock_processes: true
+enable_cascading: true
+enable_backpressure: true
+
+prometheus:
+  url: http://localhost:9090
+  timeout: 5s
+
+services:
+  gateway:
+    name: gateway
+    min_instances: 1
+    max_instances: 3  # Low max to trigger backpressure quickly
+    start_command: "./gateway-test"
+    work_dir: "/tmp"
+    health_check:
+      path: /health
+      interval: 5s
+      timeout: 2s
+    metrics:
+      - type: cpu
+        threshold: 30  # Low threshold for quick scaling
+        aggregation: avg
+      - type: request_rate
+        threshold: 100
+        aggregation: sum
+    scale_out:
+      increment: 1
+      cooldown: 5s
+    scale_in:
+      increment: 1
+      cooldown: 10s
+  
+  stream-ingester:
+    name: stream-ingester
+    min_instances: 1
+    max_instances: 2  # Low max to trigger backpressure
+    start_command: "echo stream-ingester"
+    work_dir: "/tmp"
+    metrics:
+      - type: cpu
+        threshold: 40
+        aggregation: avg
+    scale_out:
+      increment: 1
+      cooldown: 5s
+    scale_in:
+      increment: 1
+      cooldown: 10s
+  
+  hot-tier:
+    name: hot-tier
+    min_instances: 1
+    max_instances: 2  # Low max to trigger backpressure
+    start_command: "echo hot-tier"
+    work_dir: "/tmp"
+    metrics:
+      - type: memory
+        threshold: 50
+        aggregation: avg
+    scale_out:
+      increment: 1
+      cooldown: 5s
+    scale_in:
+      increment: 1
+      cooldown: 10s

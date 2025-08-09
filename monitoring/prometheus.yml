@@ -1,0 +1,72 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: 'flow-analytics'
+
+scrape_configs:
+  # Gateway metrics
+  - job_name: 'gateway'
+    static_configs:
+      - targets: ['host.docker.internal:8088']
+        labels:
+          service: 'gateway'
+          
+  # Control plane metrics
+  - job_name: 'control-plane'
+    static_configs:
+      - targets: ['host.docker.internal:8080']
+        labels:
+          service: 'control-plane'
+          
+  # Query API metrics
+  - job_name: 'query-api'
+    static_configs:
+      - targets: ['host.docker.internal:8081']
+        labels:
+          service: 'query-api'
+          
+  # Hot tier metrics
+  - job_name: 'hot-tier'
+    static_configs:
+      - targets: ['host.docker.internal:9090']
+        labels:
+          service: 'hot-tier'
+          
+  # Stream ingester metrics
+  - job_name: 'stream-ingester'
+    static_configs:
+      - targets: ['host.docker.internal:9091']
+        labels:
+          service: 'stream-ingester'
+
+  # Redpanda metrics
+  - job_name: 'redpanda'
+    static_configs:
+      - targets: ['redpanda:9644']
+        labels:
+          service: 'redpanda'
+
+  # Node exporter for system metrics
+  - job_name: 'node'
+    static_configs:
+      - targets: ['node-exporter:9100']
+        labels:
+          service: 'node-exporter'
+
+  # cAdvisor for container metrics
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']
+        labels:
+          service: 'cadvisor'
+
+# Alert rules configuration
+rule_files:
+  - 'alerts.yml'
+
+# Alertmanager configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []

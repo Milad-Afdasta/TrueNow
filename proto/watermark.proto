@@ -1,0 +1,116 @@
+syntax = "proto3";
+
+package truenow.watermark;
+option go_package = "github.com/Milad-Afdasta/TrueNow/proto/watermark;watermark";
+
+import "google/protobuf/timestamp.proto";
+
+// WatermarkService tracks data freshness across the platform
+service WatermarkService {
+  // Report a watermark from a service
+  rpc ReportWatermark(ReportWatermarkRequest) returns (ReportWatermarkResponse);
+  
+  // Stream watermarks for real-time monitoring
+  rpc StreamWatermarks(StreamWatermarksRequest) returns (stream WatermarkUpdate);
+  
+  // Get global freshness metrics
+  rpc GetGlobalFreshness(GetGlobalFreshnessRequest) returns (GlobalFreshnessResponse);
+  
+  // Get freshness for a specific namespace/table
+  rpc GetTableFreshness(GetTableFreshnessRequest) returns (TableFreshnessResponse);
+  
+  // Get SLO violations
+  rpc GetSLOViolations(GetSLOViolationsRequest) returns (SLOViolationsResponse);
+  
+  // Batch report multiple watermarks (for efficiency at scale)
+  rpc BatchReportWatermarks(BatchReportWatermarksRequest) returns (BatchReportWatermarksResponse);
+}
+
+message ReportWatermarkRequest {
+  string service = 1;
+  string namespace = 2;
+  string table = 3;
+  int64 watermark_ms = 4;  // Unix timestamp in milliseconds
+  google.protobuf.Timestamp event_time = 5;
+  map<string, string> labels = 6;
+}
+
+message ReportWatermarkResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message BatchReportWatermarksRequest {
+  repeated ReportWatermarkRequest watermarks = 1;
+}
+
+message BatchReportWatermarksResponse {
+  int32 succeeded = 1;
+  int32 failed = 2;
+  repeated string errors = 3;
+}
+
+message StreamWatermarksRequest {
+  repeated string namespaces = 1;  // Empty means all
+  repeated string tables = 2;      // Empty means all
+  int32 interval_ms = 3;          // Min 100ms
+}
+
+message WatermarkUpdate {
+  string service = 1;
+  string namespace = 2;
+  string table = 3;
+  int64 watermark_ms = 4;
+  int64 freshness_ms = 5;  // Current time - watermark
+  google.protobuf.Timestamp timestamp = 6;
+}
+
+message GetGlobalFreshnessRequest {}
+
+message GlobalFreshnessResponse {
+  int64 global_freshness_p50 = 1;
+  int64 global_freshness_p95 = 2;
+  int64 global_freshness_p99 = 3;
+  int32 total_tables = 4;
+  int32 stale_tables = 5;  // Tables exceeding SLO
+  google.protobuf.Timestamp last_update = 6;
+}
+
+message GetTableFreshnessRequest {
+  string namespace = 1;
+  string table = 2;
+}
+
+message TableFreshnessResponse {
+  string namespace = 1;
+  string table = 2;
+  int64 freshness_p50 = 3;
+  int64 freshness_p95 = 4;
+  int64 freshness_p99 = 5;
+  repeated ServiceWatermark service_watermarks = 6;
+  google.protobuf.Timestamp last_update = 7;
+}
+
+message ServiceWatermark {
+  string service = 1;
+  int64 watermark_ms = 2;
+  int64 freshness_ms = 3;
+  google.protobuf.Timestamp reported_at = 4;
+}
+
+message GetSLOViolationsRequest {
+  int32 limit = 1;  // Max violations to return
+}
+
+message SLOViolationsResponse {
+  repeated SLOViolation violations = 1;
+}
+
+message SLOViolation {
+  string namespace = 1;
+  string table = 2;
+  int64 target_ms = 3;
+  int64 current_p99 = 4;
+  float severity = 5;  // 0-1, where 1 is most severe
+  google.protobuf.Timestamp detected_at = 6;
+}
