@@ -1,6 +1,7 @@
 package ringbuffer
 
 import (
+	"math"
 	"runtime"
 	"sync/atomic"
 	"unsafe"
@@ -13,21 +14,21 @@ const CacheLineSize = 64
 // Optimized for single-writer, multiple-reader scenarios (SWMR)
 type RingBuffer struct {
 	// Cache line 1: Write-side data
-	_          [CacheLineSize]byte // Padding
-	head       atomic.Uint64       // Write position
-	_          [CacheLineSize - 8]byte
-	
-	// Cache line 2: Read-side data  
-	tail       atomic.Uint64       // Read position
-	_          [CacheLineSize - 8]byte
-	
+	_    [CacheLineSize]byte // Padding
+	head atomic.Uint64       // Write position
+	_    [CacheLineSize - 8]byte
+
+	// Cache line 2: Read-side data
+	tail atomic.Uint64 // Read position
+	_    [CacheLineSize - 8]byte
+
 	// Cache line 3: Shared immutable data
-	buffer     []unsafe.Pointer    // Actual buffer
-	capacity   uint64             // Power of 2 for fast modulo
-	mask       uint64             // capacity - 1 for bitwise AND
-	slotSize   int                // Size of each slot
-	_          [CacheLineSize - 32]byte
-	
+	buffer   []unsafe.Pointer // Actual buffer
+	capacity uint64           // Power of 2 for fast modulo
+	mask     uint64           // capacity - 1 for bitwise AND
+	slotSize int              // Size of each slot
+	_        [CacheLineSize - 32]byte
+
 	// Stats (separate cache line)
 	writes     atomic.Uint64
 	reads      atomic.Uint64
@@ -48,15 +49,15 @@ type Slot struct {
 // AggregateGroup holds aggregated metrics for a group
 type AggregateGroup struct {
 	// Atomic fields for lock-free updates
-	Sum        atomic.Uint64  // Sum of values (as uint64 bits)
-	Count      atomic.Uint64  // Count of values
-	Min        atomic.Uint64  // Minimum value (as uint64 bits)
-	Max        atomic.Uint64  // Maximum value (as uint64 bits)
-	
+	Sum   atomic.Uint64 // Sum of values (as uint64 bits)
+	Count atomic.Uint64 // Count of values
+	Min   atomic.Uint64 // Minimum value (as uint64 bits)
+	Max   atomic.Uint64 // Maximum value (as uint64 bits)
+
 	// Sketch data (not atomic, needs synchronization)
-	HLL        *HyperLogLog   // For unique counts
-	TDigest    *TDigest       // For percentiles
-	TopK       *SpaceSaving   // For top-K
+	HLL     *HyperLogLog // For unique counts
+	TDigest *TDigest     // For percentiles
+	TopK    *SpaceSaving // For top-K
 }
 
 // NewRingBuffer creates a new lock-free ring buffer
@@ -75,14 +76,14 @@ func NewRingBuffer(capacity uint64, slotSize int) *RingBuffer {
 		v++
 		capacity = v
 	}
-	
+
 	rb := &RingBuffer{
 		buffer:   make([]unsafe.Pointer, capacity),
 		capacity: capacity,
 		mask:     capacity - 1,
 		slotSize: slotSize,
 	}
-	
+
 	// Pre-allocate all slots
 	for i := uint64(0); i < capacity; i++ {
 		slot := &Slot{
@@ -90,100 +91,110 @@ func NewRingBuffer(capacity uint64, slotSize int) *RingBuffer {
 		}
 		rb.buffer[i] = unsafe.Pointer(slot)
 	}
-	
+
 	return rb
 }
 
 // Write adds data to the ring buffer (single writer)
-func (rb *RingBuffer) Write(timestamp int64, groupKey string, value float64) {
-	// Get write position
+func (rb *RingBuffer) Write(timestamp int64, groupKey string, value float64, uniqueID string) {
+	if groupKey == "" {
+		groupKey = "default"
+	}
+
 	pos := rb.head.Add(1) - 1
 	idx := pos & rb.mask
-	
-	// Get slot
+
+	// Ensure tail stays within capacity
+	for {
+		oldTail := rb.tail.Load()
+		if pos-oldTail < rb.capacity {
+			break
+		}
+		if rb.tail.CompareAndSwap(oldTail, pos-rb.capacity+1) {
+			rb.overwrites.Add(1)
+			break
+		}
+	}
+
 	slotPtr := rb.buffer[idx]
 	slot := (*Slot)(slotPtr)
-	
-	// Check if we need to clear old data (overwriting)
-	if pos >= rb.capacity {
-		oldTail := rb.tail.Load()
-		if pos-oldTail >= rb.capacity {
-			// Buffer is full, move tail forward
-			rb.tail.CompareAndSwap(oldTail, pos-rb.capacity+1)
-			rb.overwrites.Add(1)
-			
-			// Clear old slot data
-			slot.Groups = make(map[string]*AggregateGroup)
-		}
-	}
-	
-	// Update slot timestamp
-	slot.Timestamp = timestamp
-	
-	// Get or create group
+	reset := rb.prepareSlot(slot, timestamp)
+
 	group, exists := slot.Groups[groupKey]
 	if !exists {
-		group = &AggregateGroup{
-			HLL:     NewHyperLogLog(14), // 16KB for 0.8% error
-			TDigest: NewTDigest(100),    // Compression 100
-			TopK:    NewSpaceSaving(100), // Top 100
-		}
+		group = rb.newAggregateGroup(value)
 		slot.Groups[groupKey] = group
-		
-		// Initialize atomic values
-		group.Sum.Store(float64ToUint64(value))
-		group.Count.Store(1)
-		group.Min.Store(float64ToUint64(value))
-		group.Max.Store(float64ToUint64(value))
 	} else {
-		// Update aggregates atomically
 		rb.updateAggregates(group, value)
 	}
-	
-	// Increment version
-	slot.Version.Add(1)
-	
-	// Update stats
+
+	rb.updateSketches(group, value, uniqueID)
+
+	if reset {
+		slot.Version.Store(1)
+	} else {
+		slot.Version.Add(1)
+	}
+
 	rb.writes.Add(1)
 }
 
 // BatchWrite writes multiple values efficiently
 func (rb *RingBuffer) BatchWrite(data []TimeSeriesPoint) {
-	// Group by timestamp for efficient batching
-	batches := make(map[int64][]TimeSeriesPoint)
 	for _, point := range data {
-		batches[point.Timestamp] = append(batches[point.Timestamp], point)
+		rb.Write(point.Timestamp, point.GroupKey, point.Value, point.UniqueID)
 	}
-	
-	// Process each timestamp batch
-	for timestamp, points := range batches {
-		// Get slot for this timestamp
-		pos := rb.head.Add(1) - 1
-		idx := pos & rb.mask
-		slotPtr := rb.buffer[idx]
-		slot := (*Slot)(slotPtr)
-		
-		slot.Timestamp = timestamp
-		
-		// Process all points for this timestamp
-		for _, point := range points {
-			group, exists := slot.Groups[point.GroupKey]
-			if !exists {
-				group = &AggregateGroup{
-					HLL:     NewHyperLogLog(14),
-					TDigest: NewTDigest(100),
-					TopK:    NewSpaceSaving(100),
-				}
-				slot.Groups[point.GroupKey] = group
-			}
-			
-			rb.updateAggregates(group, point.Value)
+}
+
+func (rb *RingBuffer) prepareSlot(slot *Slot, timestamp int64) bool {
+	if slot.Groups == nil {
+		slot.Groups = make(map[string]*AggregateGroup)
+	}
+
+	if slot.Timestamp == timestamp {
+		return false
+	}
+
+	for key := range slot.Groups {
+		delete(slot.Groups, key)
+	}
+
+	slot.Timestamp = timestamp
+	slot.Version.Store(0)
+	return true
+}
+
+func (rb *RingBuffer) newAggregateGroup(value float64) *AggregateGroup {
+	bits := math.Float64bits(value)
+	group := &AggregateGroup{
+		HLL:     NewHyperLogLog(14),
+		TDigest: NewTDigest(100),
+		TopK:    NewSpaceSaving(100),
+	}
+	group.Sum.Store(bits)
+	group.Count.Store(1)
+	group.Min.Store(bits)
+	group.Max.Store(bits)
+	return group
+}
+
+func (rb *RingBuffer) updateSketches(group *AggregateGroup, value float64, uniqueID string) {
+	if group == nil {
+		return
+	}
+
+	if group.TDigest != nil {
+		group.TDigest.AddValue(value)
+	}
+
+	if uniqueID != "" {
+		if group.HLL != nil {
+			group.HLL.AddString(uniqueID)
 		}
-		
-		slot.Version.Add(1)
+		if group.TopK != nil {
+			group.TopK.Add(uniqueID, 1)
+		}
 	}
-	
-	rb.writes.Add(uint64(len(data)))
 }
 
 // GetHead returns the current head position
@@ -200,18 +211,18 @@ func (rb *RingBuffer) GetTail() uint64 {
 func (rb *RingBuffer) Read(position uint64) (*Slot, bool) {
 	head := rb.head.Load()
 	tail := rb.tail.Load()
-	
+
 	// Check bounds
 	if position < tail || position >= head {
 		return nil, false
 	}
-	
+
 	idx := position & rb.mask
 	slotPtr := rb.buffer[idx]
 	slot := (*Slot)(slotPtr)
-	
+
 	rb.reads.Add(1)
-	
+
 	// Return a copy to avoid race conditions
 	return rb.copySlot(slot), true
 }
@@ -220,7 +231,7 @@ func (rb *RingBuffer) Read(position uint64) (*Slot, bool) {
 func (rb *RingBuffer) ReadRange(startPos, endPos uint64) []*Slot {
 	head := rb.head.Load()
 	tail := rb.tail.Load()
-	
+
 	// Adjust bounds
 	if startPos < tail {
 		startPos = tail
@@ -228,61 +239,59 @@ func (rb *RingBuffer) ReadRange(startPos, endPos uint64) []*Slot {
 	if endPos > head {
 		endPos = head
 	}
-	
+
 	if startPos >= endPos {
 		return nil
 	}
-	
+
 	results := make([]*Slot, 0, endPos-startPos)
-	
+
 	for pos := startPos; pos < endPos; pos++ {
 		idx := pos & rb.mask
 		slotPtr := rb.buffer[idx]
 		slot := (*Slot)(slotPtr)
 		results = append(results, rb.copySlot(slot))
 	}
-	
+
 	rb.reads.Add(uint64(len(results)))
-	
+
 	return results
 }
 
 // updateAggregates updates group aggregates atomically
 func (rb *RingBuffer) updateAggregates(group *AggregateGroup, value float64) {
-	valueUint := float64ToUint64(value)
-	
-	// Update sum
+	valueBits := math.Float64bits(value)
+
 	for {
 		oldSum := group.Sum.Load()
-		newSum := float64ToUint64(uint64ToFloat64(oldSum) + value)
+		newSum := math.Float64bits(math.Float64frombits(oldSum) + value)
 		if group.Sum.CompareAndSwap(oldSum, newSum) {
 			break
 		}
 		runtime.Gosched()
 	}
-	
-	// Update count
+
 	group.Count.Add(1)
-	
-	// Update min
+
 	for {
 		oldMin := group.Min.Load()
-		if uint64ToFloat64(valueUint) >= uint64ToFloat64(oldMin) {
+		oldVal := math.Float64frombits(oldMin)
+		if value >= oldVal {
 			break
 		}
-		if group.Min.CompareAndSwap(oldMin, valueUint) {
+		if group.Min.CompareAndSwap(oldMin, valueBits) {
 			break
 		}
 		runtime.Gosched()
 	}
-	
-	// Update max
+
 	for {
 		oldMax := group.Max.Load()
-		if uint64ToFloat64(valueUint) <= uint64ToFloat64(oldMax) {
+		oldVal := math.Float64frombits(oldMax)
+		if value <= oldVal {
 			break
 		}
-		if group.Max.CompareAndSwap(oldMax, valueUint) {
+		if group.Max.CompareAndSwap(oldMax, valueBits) {
 			break
 		}
 		runtime.Gosched()
@@ -295,7 +304,7 @@ func (rb *RingBuffer) copySlot(slot *Slot) *Slot {
 		Timestamp: slot.Timestamp,
 		Groups:    make(map[string]*AggregateGroup),
 	}
-	
+
 	// Deep copy groups
 	for key, group := range slot.Groups {
 		copyGroup := &AggregateGroup{}
@@ -303,7 +312,7 @@ func (rb *RingBuffer) copySlot(slot *Slot) *Slot {
 		copyGroup.Count.Store(group.Count.Load())
 		copyGroup.Min.Store(group.Min.Load())
 		copyGroup.Max.Store(group.Max.Load())
-		
+
 		// Copy sketches (these need proper copying in production)
 		if group.HLL != nil {
 			copyGroup.HLL = group.HLL.Clone()
@@ -314,12 +323,12 @@ func (rb *RingBuffer) copySlot(slot *Slot) *Slot {
 		if group.TopK != nil {
 			copyGroup.TopK = group.TopK.Clone()
 		}
-		
+
 		copy.Groups[key] = copyGroup
 	}
-	
+
 	copy.Version.Store(slot.Version.Load())
-	
+
 	return copy
 }
 
