@@ -354,9 +354,9 @@ type TimeSeriesPoint struct {
 
 // Helper functions for float64 <-> uint64 conversion (for atomic operations)
 func float64ToUint64(f float64) uint64 {
-	return *(*uint64)(unsafe.Pointer(&f))
+	return math.Float64bits(f)
 }
 
 func uint64ToFloat64(u uint64) float64 {
-	return *(*float64)(unsafe.Pointer(&u))
+	return math.Float64frombits(u)
 }
