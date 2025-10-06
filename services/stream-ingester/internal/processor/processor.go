@@ -11,10 +11,10 @@ import (
 
 // EventProcessor handles event transformation and deduplication
 type EventProcessor struct {
-	batchSize    int
-	dedupWindow  time.Duration
-	dedupIndex   sync.Map // map[string]time.Time
-	
+	batchSize   int
+	dedupWindow time.Duration
+	dedupIndex  sync.Map // map[string]time.Time
+
 	// Stats
 	processed    atomic.Uint64
 	deduplicated atomic.Uint64
@@ -27,37 +27,37 @@ func NewEventProcessor(batchSize int) *EventProcessor {
 		batchSize:   batchSize,
 		dedupWindow: 24 * time.Hour,
 	}
-	
+
 	// Start cleanup goroutine
 	go ep.cleanupLoop()
-	
+
 	return ep
 }
 
 // ProcessBatch processes a batch of events
 func (ep *EventProcessor) ProcessBatch(events []interface{}) []interface{} {
 	processed := make([]interface{}, 0, len(events))
-	
+
 	for _, event := range events {
 		// Generate dedup key
 		dedupKey := ep.generateDedupKey(event)
-		
+
 		// Check for duplicate
 		if ep.isDuplicate(dedupKey) {
 			ep.deduplicated.Add(1)
 			continue
 		}
-		
+
 		// Transform event
 		transformed := ep.transform(event)
 		if transformed != nil {
 			processed = append(processed, transformed)
 			ep.transformed.Add(1)
 		}
-		
+
 		ep.processed.Add(1)
 	}
-	
+
 	return processed
 }
 
@@ -66,11 +66,12 @@ func (ep *EventProcessor) generateDedupKey(event interface{}) string {
 	// Use actual event data for dedup key
 	if eventMap, ok := event.(map[string]interface{}); ok {
 		if eventID, ok := eventMap["EventID"].(string); ok {
-			// Use event ID as dedup key
-			return eventID
+			namespace, _ := eventMap["Namespace"].(string)
+			table, _ := eventMap["Table"].(string)
+			return fmt.Sprintf("%s|%s|%s", namespace, table, eventID)
 		}
 	}
-	
+
 	// Fallback to timestamp-based key
 	return fmt.Sprintf("%d_%d", time.Now().UnixNano(), time.Now().Unix())
 }
@@ -78,7 +79,7 @@ func (ep *EventProcessor) generateDedupKey(event interface{}) string {
 // isDuplicate checks if event is a duplicate
 func (ep *EventProcessor) isDuplicate(key string) bool {
 	now := time.Now()
-	
+
 	// Check if exists
 	if val, exists := ep.dedupIndex.Load(key); exists {
 		if timestamp, ok := val.(time.Time); ok {
@@ -88,7 +89,7 @@ func (ep *EventProcessor) isDuplicate(key string) bool {
 			}
 		}
 	}
-	
+
 	// Store new entry
 	ep.dedupIndex.Store(key, now)
 	return false
@@ -101,7 +102,7 @@ func (ep *EventProcessor) transform(event interface{}) interface{} {
 	// - Type conversions
 	// - Enrichment
 	// - Filtering
-	
+
 	// For now, pass through
 	return event
 }
@@ -110,11 +111,11 @@ func (ep *EventProcessor) transform(event interface{}) interface{} {
 func (ep *EventProcessor) cleanupLoop() {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
-	
+
 	for range ticker.C {
 		cutoff := time.Now().Add(-ep.dedupWindow)
 		removed := 0
-		
+
 		ep.dedupIndex.Range(func(key, value interface{}) bool {
 			if timestamp, ok := value.(time.Time); ok {
 				if timestamp.Before(cutoff) {
@@ -124,7 +125,7 @@ func (ep *EventProcessor) cleanupLoop() {
 			}
 			return true
 		})
-		
+
 		if removed > 0 {
 			log.Debugf("Cleaned up %d old dedup entries", removed)
 		}

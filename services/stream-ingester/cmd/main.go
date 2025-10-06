@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -42,13 +43,23 @@ func main() {
 	// Create components
 	kafkaConsumer := consumer.NewKafkaConsumer(config.KafkaBrokers, config.ConsumerGroup, config.Topics)
 	eventProcessor := processor.NewEventProcessor(config.BatchSize)
-	hotTierWriter := writer.NewHotTierWriter(config.HotTierEndpoint)
+	hotTierEndpoints := splitAndTrim(config.HotTierEndpoint)
+	hotTierWriter := writer.NewHotTierWriter(hotTierEndpoints...)
 
 	// Start workers
 	var wg sync.WaitGroup
+	batchSize := config.BatchSize
+	if batchSize <= 0 {
+		batchSize = 500
+	}
+	flushInterval := config.BatchTimeout
+	if flushInterval <= 0 {
+		flushInterval = 100 * time.Millisecond
+	}
+
 	for i := 0; i < config.NumWorkers; i++ {
 		wg.Add(1)
-		go worker(ctx, &wg, kafkaConsumer, eventProcessor, hotTierWriter, i)
+		go worker(ctx, &wg, kafkaConsumer, eventProcessor, hotTierWriter, i, batchSize, flushInterval)
 	}
 
 	log.Infof("Stream Ingester started with %d workers", config.NumWorkers)
@@ -60,10 +71,10 @@ func main() {
 
 	log.Info("Shutting down stream ingester...")
 	cancel()
-	
+
 	// Wait for workers to finish
 	wg.Wait()
-	
+
 	// Close connections
 	kafkaConsumer.Close()
 	hotTierWriter.Close()
@@ -71,80 +82,193 @@ func main() {
 	log.Info("Stream ingester exited")
 }
 
-func worker(ctx context.Context, wg *sync.WaitGroup, 
-	consumer *consumer.KafkaConsumer,
+func worker(ctx context.Context, wg *sync.WaitGroup,
+	cons *consumer.KafkaConsumer,
 	processor *processor.EventProcessor,
 	writer *writer.HotTierWriter,
-	workerID int) {
-	
+	workerID int,
+	batchSize int,
+	flushInterval time.Duration) {
+
 	defer wg.Done()
-	
-	batch := make([]*Event, 0, 1000)
-	ticker := time.NewTicker(100 * time.Millisecond)
+
+	if batchSize <= 0 {
+		batchSize = 1
+	}
+	if flushInterval <= 0 {
+		flushInterval = 100 * time.Millisecond
+	}
+
+	batch := make([]*inFlightEvent, 0, batchSize)
+	ticker := time.NewTicker(flushInterval)
 	defer ticker.Stop()
+
+	flush := func(current []*inFlightEvent) ([]*inFlightEvent, error) {
+		return flushBatch(ctx, current, processor, writer, workerID)
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
-			// Flush remaining batch
 			if len(batch) > 0 {
-				processBatch(batch, processor, writer, workerID)
+				if updated, err := flush(batch); err != nil {
+					log.WithError(err).Warnf("Worker %d: graceful flush aborted", workerID)
+				} else {
+					batch = updated
+				}
 			}
 			return
 
-		case msg := <-consumer.Messages():
-			// Parse event with headers
-			event := parseKafkaMessage(msg)
-			if event != nil {
-				batch = append(batch, event)
+		case record, ok := <-cons.Messages():
+			if !ok {
+				if len(batch) > 0 {
+					if updated, err := flush(batch); err != nil {
+						log.WithError(err).Warnf("Worker %d: final flush aborted", workerID)
+					} else {
+						batch = updated
+					}
+				}
+				return
 			}
 
-			// Process batch if full
-			if len(batch) >= 1000 {
-				processBatch(batch, processor, writer, workerID)
-				batch = batch[:0]
+			event := parseKafkaMessage(record.Message)
+			if event == nil {
+				ackWithTimeout(record, 5*time.Second)
+				continue
+			}
+
+			batch = append(batch, &inFlightEvent{event: event, record: record})
+
+			if len(batch) >= batchSize {
+				updated, err := flush(batch)
+				if err != nil {
+					if ctx.Err() != nil {
+						return
+					}
+					log.WithError(err).Errorf("Worker %d: retrying batch of %d events", workerID, len(batch))
+					continue
+				}
+				batch = updated
 			}
 
 		case <-ticker.C:
-			// Periodic flush
-			if len(batch) > 0 {
-				processBatch(batch, processor, writer, workerID)
-				batch = batch[:0]
+			if len(batch) == 0 {
+				continue
 			}
+			updated, err := flush(batch)
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				log.WithError(err).Errorf("Worker %d: retrying batch of %d events", workerID, len(batch))
+				continue
+			}
+			batch = updated
 		}
 	}
 }
 
-func processBatch(batch []*Event, processor *processor.EventProcessor, 
-	writer *writer.HotTierWriter, workerID int) {
-	
+func processBatch(ctx context.Context, batch []*inFlightEvent,
+	processor *processor.EventProcessor,
+	writer *writer.HotTierWriter,
+	workerID int) error {
+
+	if len(batch) == 0 {
+		return nil
+	}
+
 	start := time.Now()
-	
-	// Convert to interface slice as maps for the writer
+
 	events := make([]interface{}, len(batch))
-	for i, e := range batch {
-		// Convert Event struct to map for writer
+	for i, item := range batch {
 		events[i] = map[string]interface{}{
-			"EventID":   e.EventID,
-			"EventTime": e.EventTime,
-			"Namespace": e.Namespace,
-			"Table":     e.Table,
-			"Data":      e.Data,
+			"EventID":   item.event.EventID,
+			"EventTime": item.event.EventTime,
+			"Namespace": item.event.Namespace,
+			"Table":     item.event.Table,
+			"Data":      item.event.Data,
 		}
 	}
-	
-	// Process events (dedup, transform, etc)
+
 	processed := processor.ProcessBatch(events)
-	
-	// Write to hot tier
-	err := writer.WriteBatch(processed)
-	if err != nil {
-		log.Errorf("Worker %d: Failed to write batch: %v", workerID, err)
+	if len(processed) == 0 {
+		ackBatch(batch, 5*time.Second)
+		return nil
+	}
+
+	if err := writer.WriteBatch(processed); err != nil {
+		return err
+	}
+
+	ackBatch(batch, 5*time.Second)
+	log.Debugf("Worker %d: processed %d events in %s", workerID, len(batch), time.Since(start))
+	return nil
+}
+
+func flushBatch(ctx context.Context, batch []*inFlightEvent,
+	processor *processor.EventProcessor,
+	writer *writer.HotTierWriter,
+	workerID int) ([]*inFlightEvent, error) {
+
+	if len(batch) == 0 {
+		return batch[:0], nil
+	}
+
+	backoff := 200 * time.Millisecond
+	for {
+		if err := processBatch(ctx, batch, processor, writer, workerID); err != nil {
+			select {
+			case <-ctx.Done():
+				return batch, ctx.Err()
+			case <-time.After(backoff):
+			}
+			if backoff < 5*time.Second {
+				backoff *= 2
+				if backoff > 5*time.Second {
+					backoff = 5 * time.Second
+				}
+			}
+			continue
+		}
+		return batch[:0], nil
+	}
+}
+
+func ackBatch(batch []*inFlightEvent, timeout time.Duration) {
+	for _, item := range batch {
+		ackWithTimeout(item.record, timeout)
+	}
+}
+
+func ackWithTimeout(record *consumer.Record, timeout time.Duration) {
+	if record == nil {
 		return
 	}
-	
-	duration := time.Since(start)
-	log.Debugf("Worker %d: Processed %d events in %v", workerID, len(batch), duration)
+
+	ctx := context.Background()
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+
+	if err := record.Ack(ctx); err != nil {
+		log.WithError(err).Warn("stream-ingester: failed to commit kafka offset")
+	}
+}
+
+func splitAndTrim(list string) []string {
+	if list == "" {
+		return nil
+	}
+	parts := strings.Split(list, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
 }
 
 type Config struct {
@@ -165,6 +289,11 @@ type Event struct {
 	Data      map[string]interface{}
 }
 
+type inFlightEvent struct {
+	event  *Event
+	record *consumer.Record
+}
+
 func parseKafkaMessage(msg kafka.Message) *Event {
 	// Parse the event from Kafka message
 	var eventData map[string]interface{}
@@ -183,34 +312,92 @@ func parseKafkaMessage(msg kafka.Message) *Event {
 			table = string(header.Value)
 		}
 	}
+	if namespace == "" {
+		if ns, ok := eventData["namespace"].(string); ok {
+			namespace = ns
+		}
+	}
+	if table == "" {
+		if tbl, ok := eventData["table"].(string); ok {
+			table = tbl
+		}
+	}
 
 	// Extract event fields
 	eventID, _ := eventData["id"].(string)
 	if eventID == "" {
-		eventID = fmt.Sprintf("event-%d", time.Now().UnixNano())
-	}
-
-	eventTime, ok := eventData["time"].(float64)
-	if !ok {
-		// Try event_time field (expecting microseconds)
-		eventTime, ok = eventData["event_time"].(float64)
-		if !ok {
-			eventTime = float64(time.Now().UnixMicro())
+		if len(msg.Key) > 0 {
+			eventID = fmt.Sprintf("%s-%d", string(msg.Key), msg.Offset)
+		} else {
+			eventID = fmt.Sprintf("event-%d", time.Now().UnixNano())
 		}
 	}
+
+	eventTimeMicros := extractEventTime(eventData)
 
 	// Extract dimensions
 	dims, _ := eventData["dims"].(map[string]interface{})
 	if dims == nil {
 		dims = make(map[string]interface{})
 	}
+	if extraDims, ok := eventData["dimensions"].(map[string]interface{}); ok {
+		for k, v := range extraDims {
+			dims[k] = v
+		}
+	}
+
+	if namespace == "" || table == "" {
+		log.Warnf("Discarding event %s missing namespace/table", eventID)
+		return nil
+	}
 
 	return &Event{
 		EventID:   eventID,
-		EventTime: int64(eventTime), // In microseconds
+		EventTime: eventTimeMicros,
 		Namespace: namespace,
 		Table:     table,
 		Data:      dims,
+	}
+}
+
+func extractEventTime(eventData map[string]interface{}) int64 {
+	candidates := []interface{}{eventData["event_time"], eventData["eventTime"], eventData["time"]}
+	for _, candidate := range candidates {
+		switch v := candidate.(type) {
+		case float64:
+			if v == 0 {
+				continue
+			}
+			ts := int64(v)
+			return normalizeToMicros(ts)
+		case int64:
+			if v == 0 {
+				continue
+			}
+			return normalizeToMicros(v)
+		case json.Number:
+			if val, err := v.Int64(); err == nil {
+				return normalizeToMicros(val)
+			}
+		case string:
+			if val, err := time.Parse(time.RFC3339Nano, v); err == nil {
+				return val.UnixMicro()
+			}
+		}
+	}
+	return time.Now().UnixMicro()
+}
+
+func normalizeToMicros(ts int64) int64 {
+	switch {
+	case ts <= 0:
+		return time.Now().UnixMicro()
+	case ts < 1_000_000_000_000: // likely seconds
+		return ts * int64(time.Second/time.Microsecond)
+	case ts < 1_000_000_000_000_000: // likely milliseconds
+		return ts * int64(time.Millisecond/time.Microsecond)
+	default:
+		return ts
 	}
 }
 
