@@ -14,12 +14,12 @@ const (
 
 // Errors
 var (
-	ErrQueueFull        = errors.New("request queue is full")
-	ErrTimeout          = errors.New("request timeout")
-	ErrInvalidPriority  = errors.New("invalid priority level")
-	ErrShuttingDown     = errors.New("service is shutting down")
-	ErrRateLimited      = errors.New("rate limit exceeded")
-	ErrCircuitOpen      = errors.New("circuit breaker is open")
+	ErrQueueFull       = errors.New("request queue is full")
+	ErrTimeout         = errors.New("request timeout")
+	ErrInvalidPriority = errors.New("invalid priority level")
+	ErrShuttingDown    = errors.New("service is shutting down")
+	ErrRateLimited     = errors.New("rate limit exceeded")
+	ErrCircuitOpen     = errors.New("circuit breaker is open")
 )
 
 // QueueMetrics contains queue statistics
@@ -28,6 +28,7 @@ type QueueMetrics struct {
 	Processed  int64
 	Dropped    int64
 	TimedOut   int64
+	Capacity   int64
 	QueueSizes map[string]int
 }
 
@@ -35,22 +36,22 @@ type QueueMetrics struct {
 type AdaptiveConfig struct {
 	// Target latency in milliseconds
 	TargetLatencyMs int64
-	
+
 	// Target success rate (0-100)
 	TargetSuccessRate float64
-	
+
 	// Queue size limits
 	MinQueueSize int64
 	MaxQueueSize int64
-	
+
 	// Rate limit bounds
 	MinRateLimit int64
 	MaxRateLimit int64
-	
+
 	// Adjustment factors
 	IncreaseRate float64 // How fast to increase limits (e.g., 1.1 = 10% increase)
 	DecreaseRate float64 // How fast to decrease limits (e.g., 0.9 = 10% decrease)
-	
+
 	// Evaluation window
 	WindowSize int // Number of samples to consider
 }

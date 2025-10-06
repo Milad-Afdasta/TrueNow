@@ -8,31 +8,32 @@ import (
 
 	"github.com/Milad-Afdasta/TrueNow/services/gateway/internal/backpressure"
 	"github.com/Milad-Afdasta/TrueNow/services/gateway/internal/circuit"
+	"github.com/Milad-Afdasta/TrueNow/services/gateway/internal/metrics"
 	"github.com/Milad-Afdasta/TrueNow/services/gateway/internal/producer"
 	"github.com/Milad-Afdasta/TrueNow/services/gateway/internal/ratelimit"
 	"github.com/Milad-Afdasta/TrueNow/services/gateway/internal/validator"
-	"github.com/valyala/fasthttp"
 	log "github.com/sirupsen/logrus"
+	"github.com/valyala/fasthttp"
 )
 
 // EnhancedHandler handles ingestion with full backpressure management
 type EnhancedHandler struct {
 	*Handler // Embed the base handler
-	
+
 	// Backpressure components
 	circuitBreaker *circuit.CircuitBreaker
 	requestQueue   *backpressure.RequestQueue
 	loadShedder    *backpressure.LoadShedder
 	adaptive       *backpressure.AdaptiveController
-	
+
 	// Metrics for adaptive control
-	latencySum     atomic.Int64
-	latencyCount   atomic.Int64
-	successCount   atomic.Int64
-	failureCount   atomic.Int64
-	
+	latencySum   atomic.Int64
+	latencyCount atomic.Int64
+	successCount atomic.Int64
+	failureCount atomic.Int64
+
 	// System metrics update channel
-	metricsUpdate  chan SystemMetrics
+	metricsUpdate chan SystemMetrics
 }
 
 // SystemMetrics contains current system metrics
@@ -43,46 +44,46 @@ type SystemMetrics struct {
 }
 
 // NewEnhancedHandler creates a handler with backpressure management
-func NewEnhancedHandler(v *validator.SIMDValidator, p *producer.BatchProducer, r *ratelimit.HierarchicalLimiter) *EnhancedHandler {
-	baseHandler := NewHandler(v, p, r)
-	
+func NewEnhancedHandler(v *validator.SIMDValidator, p *producer.BatchProducer, r *ratelimit.HierarchicalLimiter, m *metrics.PrometheusExporter) *EnhancedHandler {
+	baseHandler := NewHandler(v, p, r, m)
+
 	eh := &EnhancedHandler{
 		Handler: baseHandler,
-		
+
 		// Circuit breaker: open after 100 failures in 10 seconds
 		circuitBreaker: circuit.NewCircuitBreaker(100, 10*time.Second),
-		
+
 		// Request queue: 100K max size, 5 second max wait
 		requestQueue: backpressure.NewRequestQueue(100000, 5*time.Second),
-		
+
 		// Load shedder: target 80% utilization
 		loadShedder: backpressure.NewLoadShedder(
 			backpressure.StrategyAdaptive,
 			0.80,
 		),
-		
+
 		// Adaptive controller
 		adaptive: backpressure.NewAdaptiveController(backpressure.AdaptiveConfig{
-			TargetLatencyMs:   50,    // Target 50ms p99 latency
-			TargetSuccessRate: 99.9,  // Target 99.9% success rate
+			TargetLatencyMs:   50,   // Target 50ms p99 latency
+			TargetSuccessRate: 99.9, // Target 99.9% success rate
 			MinQueueSize:      1000,
 			MaxQueueSize:      100000,
 			MinRateLimit:      1000,
 			MaxRateLimit:      100000,
-			IncreaseRate:      1.1,   // 10% increase
-			DecreaseRate:      0.8,   // 20% decrease
-			WindowSize:        60,    // 60 second window
+			IncreaseRate:      1.1, // 10% increase
+			DecreaseRate:      0.8, // 20% decrease
+			WindowSize:        60,  // 60 second window
 		}),
-		
+
 		metricsUpdate: make(chan SystemMetrics, 100),
 	}
-	
+
 	// Start request processors
 	eh.requestQueue.ProcessRequests(eh.processQueuedRequest, 50) // 50 workers
-	
+
 	// Start metrics updater
 	go eh.metricsUpdater()
-	
+
 	return eh
 }
 
@@ -96,25 +97,25 @@ func (eh *EnhancedHandler) HandleWithBackpressure(ctx *fasthttp.RequestCtx) {
 		eh.latencyCount.Add(1)
 		eh.adaptive.RecordLatency(latency)
 	}()
-	
+
 	// Increment total requests
 	eh.requestsTotal.Add(1)
-	
+
 	// Extract priority from headers or path
 	priority := eh.extractPriority(ctx)
-	
+
 	// Step 1: Check if we should shed this request
 	if eh.loadShedder.ShouldShed(priority) {
 		eh.handleLoadShed(ctx)
 		return
 	}
-	
+
 	// Step 2: Check circuit breaker
 	if eh.circuitBreaker.GetState() == circuit.StateOpen {
 		eh.handleCircuitOpen(ctx)
 		return
 	}
-	
+
 	// Step 3: Check adaptive rate limit
 	adaptiveLimit := eh.adaptive.GetRateLimit()
 	namespace := ctx.Request.Header.Peek("X-Namespace")
@@ -125,7 +126,7 @@ func (eh *EnhancedHandler) HandleWithBackpressure(ctx *fasthttp.RequestCtx) {
 			return
 		}
 	}
-	
+
 	// Step 4: Try to process immediately if queue is small
 	queueSize := eh.requestQueue.GetMetrics().Queued
 	if queueSize < 100 { // Low queue, process immediately
@@ -137,7 +138,7 @@ func (eh *EnhancedHandler) HandleWithBackpressure(ctx *fasthttp.RequestCtx) {
 			}
 			return nil
 		})
-		
+
 		if err != nil {
 			eh.failureCount.Add(1)
 			eh.adaptive.RecordSuccess(false)
@@ -147,7 +148,7 @@ func (eh *EnhancedHandler) HandleWithBackpressure(ctx *fasthttp.RequestCtx) {
 		}
 		return
 	}
-	
+
 	// Step 5: Queue the request for async processing
 	req := &backpressure.Request{
 		Data:      ctx.PostBody(),
@@ -156,7 +157,7 @@ func (eh *EnhancedHandler) HandleWithBackpressure(ctx *fasthttp.RequestCtx) {
 		Context:   context.Background(),
 		Response:  make(chan backpressure.Response, 1),
 	}
-	
+
 	// Try to enqueue with timeout
 	err := eh.requestQueue.Enqueue(req, priority)
 	if err != nil {
@@ -172,7 +173,7 @@ func (eh *EnhancedHandler) HandleWithBackpressure(ctx *fasthttp.RequestCtx) {
 		eh.adaptive.RecordSuccess(false)
 		return
 	}
-	
+
 	// Wait for response (with timeout)
 	select {
 	case resp := <-req.Response:
@@ -187,7 +188,7 @@ func (eh *EnhancedHandler) HandleWithBackpressure(ctx *fasthttp.RequestCtx) {
 			eh.successCount.Add(1)
 			eh.adaptive.RecordSuccess(true)
 		}
-		
+
 	case <-time.After(5 * time.Second):
 		eh.handleTimeout(ctx)
 		eh.failureCount.Add(1)
@@ -199,14 +200,14 @@ func (eh *EnhancedHandler) HandleWithBackpressure(ctx *fasthttp.RequestCtx) {
 func (eh *EnhancedHandler) processQueuedRequest(req *backpressure.Request) backpressure.Response {
 	// Create a mock fasthttp context for processing
 	// In production, you'd want a more sophisticated approach
-	
+
 	// Use circuit breaker for processing
 	err := eh.circuitBreaker.Call(func() error {
 		// Process with the base handler logic
 		// This is simplified - in production you'd properly handle the request
 		return nil
 	})
-	
+
 	if err != nil {
 		return backpressure.Response{
 			StatusCode: 503,
@@ -214,7 +215,7 @@ func (eh *EnhancedHandler) processQueuedRequest(req *backpressure.Request) backp
 			Error:      err,
 		}
 	}
-	
+
 	return backpressure.Response{
 		StatusCode: 202,
 		Body:       []byte(`{"accepted":true}`),
@@ -228,7 +229,7 @@ func (eh *EnhancedHandler) extractPriority(ctx *fasthttp.RequestCtx) backpressur
 	if string(ctx.Path()) == "/health" {
 		return backpressure.PriorityCritical
 	}
-	
+
 	// Check priority header
 	priorityHeader := ctx.Request.Header.Peek("X-Priority")
 	switch string(priorityHeader) {
@@ -261,6 +262,9 @@ func (eh *EnhancedHandler) handleLoadShed(ctx *fasthttp.RequestCtx) {
 	ctx.Response.Header.Set("Retry-After", "5")
 	eh.requestsRejected.Add(1)
 	log.Debug("Request shed due to overload")
+	if eh.metrics != nil {
+		eh.metrics.RecordError("load_shed")
+	}
 }
 
 func (eh *EnhancedHandler) handleCircuitOpen(ctx *fasthttp.RequestCtx) {
@@ -269,6 +273,9 @@ func (eh *EnhancedHandler) handleCircuitOpen(ctx *fasthttp.RequestCtx) {
 	ctx.Response.Header.Set("Retry-After", "10")
 	eh.requestsRejected.Add(1)
 	log.Debug("Request rejected: circuit breaker open")
+	if eh.metrics != nil {
+		eh.metrics.RecordError("circuit_open")
+	}
 }
 
 func (eh *EnhancedHandler) handleRateLimited(ctx *fasthttp.RequestCtx) {
@@ -277,6 +284,9 @@ func (eh *EnhancedHandler) handleRateLimited(ctx *fasthttp.RequestCtx) {
 	ctx.Response.Header.Set("Retry-After", "1")
 	ctx.Response.Header.Set("X-RateLimit-Limit", fmt.Sprintf("%d", eh.adaptive.GetRateLimit()))
 	eh.requestsRejected.Add(1)
+	if eh.metrics != nil {
+		eh.metrics.RecordError("rate_limited")
+	}
 }
 
 func (eh *EnhancedHandler) handleQueueFull(ctx *fasthttp.RequestCtx) {
@@ -285,6 +295,9 @@ func (eh *EnhancedHandler) handleQueueFull(ctx *fasthttp.RequestCtx) {
 	ctx.Response.Header.Set("Retry-After", "2")
 	eh.requestsRejected.Add(1)
 	log.Debug("Request rejected: queue full")
+	if eh.metrics != nil {
+		eh.metrics.RecordError("queue_full")
+	}
 }
 
 func (eh *EnhancedHandler) handleTimeout(ctx *fasthttp.RequestCtx) {
@@ -292,6 +305,9 @@ func (eh *EnhancedHandler) handleTimeout(ctx *fasthttp.RequestCtx) {
 	ctx.SetBodyString(`{"error":"Request timeout"}`)
 	eh.requestsRejected.Add(1)
 	log.Debug("Request timeout")
+	if eh.metrics != nil {
+		eh.metrics.RecordError("timeout")
+	}
 }
 
 func (eh *EnhancedHandler) handleError(ctx *fasthttp.RequestCtx, err error) {
@@ -299,23 +315,35 @@ func (eh *EnhancedHandler) handleError(ctx *fasthttp.RequestCtx, err error) {
 	ctx.SetBodyString(fmt.Sprintf(`{"error":"%s"}`, err.Error()))
 	eh.requestsRejected.Add(1)
 	log.Errorf("Request error: %v", err)
+	if eh.metrics != nil {
+		eh.metrics.RecordError("internal_error")
+	}
 }
 
 // metricsUpdater periodically updates system metrics
 func (eh *EnhancedHandler) metricsUpdater() {
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
-	
+
 	for {
 		select {
 		case <-ticker.C:
 			// Calculate current metrics
 			queueMetrics := eh.requestQueue.GetMetrics()
-			
+			if eh.metrics != nil {
+				eh.metrics.RecordBackpressure(
+					queueMetrics.Queued,
+					queueMetrics.Capacity,
+					queueMetrics.Dropped,
+					eh.circuitBreaker.GetState() == circuit.StateOpen,
+					0,
+				)
+			}
+
 			// Update load shedder with current system state
 			// Start with low values that increase with load
 			requestRate := float64(eh.requestsTotal.Load()) / 10000.0 // Normalize
-			cpuEstimate := 20.0 + requestRate*30.0 // 20% base + load factor
+			cpuEstimate := 20.0 + requestRate*30.0                    // 20% base + load factor
 			if cpuEstimate > 95.0 {
 				cpuEstimate = 95.0
 			}
@@ -323,13 +351,13 @@ func (eh *EnhancedHandler) metricsUpdater() {
 			if memEstimate > 90.0 {
 				memEstimate = 90.0
 			}
-			
+
 			eh.loadShedder.UpdateMetrics(
 				cpuEstimate,
 				memEstimate,
 				queueMetrics.Queued,
 			)
-			
+
 		case metrics := <-eh.metricsUpdate:
 			// External metrics update
 			eh.loadShedder.UpdateMetrics(
@@ -337,8 +365,31 @@ func (eh *EnhancedHandler) metricsUpdater() {
 				metrics.MemoryPercent,
 				metrics.QueueDepth,
 			)
+			if eh.metrics != nil {
+				queueMetrics := eh.requestQueue.GetMetrics()
+				eh.metrics.RecordBackpressure(
+					metrics.QueueDepth,
+					queueMetrics.Capacity,
+					queueMetrics.Dropped,
+					eh.circuitBreaker.GetState() == circuit.StateOpen,
+					0,
+				)
+			}
 		}
 	}
+}
+
+// PushSystemMetrics feeds externally collected system metrics into the adaptive controller.
+func (eh *EnhancedHandler) PushSystemMetrics(metrics SystemMetrics) {
+	select {
+	case eh.metricsUpdate <- metrics:
+	default:
+	}
+}
+
+// GetQueueMetrics exposes the current queue metrics for monitoring.
+func (eh *EnhancedHandler) GetQueueMetrics() backpressure.QueueMetrics {
+	return eh.requestQueue.GetMetrics()
 }
 
 // GetBackpressureMetrics returns comprehensive backpressure metrics
@@ -346,25 +397,25 @@ func (eh *EnhancedHandler) GetBackpressureMetrics() map[string]interface{} {
 	queueMetrics := eh.requestQueue.GetMetrics()
 	circuitMetrics := eh.circuitBreaker.GetMetrics()
 	shedMetrics := eh.loadShedder.GetStats()
-	
+
 	// Calculate average latency
 	avgLatency := int64(0)
 	count := eh.latencyCount.Load()
 	if count > 0 {
 		avgLatency = eh.latencySum.Load() / count
 	}
-	
+
 	// Calculate success rate
 	successRate := float64(0)
 	total := eh.successCount.Load() + eh.failureCount.Load()
 	if total > 0 {
 		successRate = float64(eh.successCount.Load()) * 100 / float64(total)
 	}
-	
+
 	return map[string]interface{}{
-		"queue": queueMetrics,
+		"queue":           queueMetrics,
 		"circuit_breaker": circuitMetrics,
-		"load_shedding": shedMetrics,
+		"load_shedding":   shedMetrics,
 		"adaptive": map[string]int64{
 			"queue_size": eh.adaptive.GetQueueSize(),
 			"rate_limit": eh.adaptive.GetRateLimit(),

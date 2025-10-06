@@ -11,12 +11,14 @@ import (
 	"time"
 
 	"github.com/Milad-Afdasta/TrueNow/services/gateway/internal/ingestion"
+	"github.com/Milad-Afdasta/TrueNow/services/gateway/internal/metrics"
 	"github.com/Milad-Afdasta/TrueNow/services/gateway/internal/producer"
 	"github.com/Milad-Afdasta/TrueNow/services/gateway/internal/ratelimit"
 	"github.com/Milad-Afdasta/TrueNow/services/gateway/internal/validator"
+	"github.com/shirou/gopsutil/v4/process"
+	log "github.com/sirupsen/logrus"
 	"github.com/valyala/fasthttp"
 	"github.com/valyala/fasthttp/reuseport"
-	log "github.com/sirupsen/logrus"
 )
 
 func main() {
@@ -27,9 +29,15 @@ func main() {
 	log.SetFormatter(&log.JSONFormatter{})
 	log.SetLevel(log.InfoLevel)
 
+	hostname, err := os.Hostname()
+	if err != nil || hostname == "" {
+		hostname = "unknown"
+	}
+	metricsExporter := metrics.NewPrometheusExporter("gateway", "ingest-gateway", hostname)
+
 	// Pin to CPU cores for NUMA optimization
 	runtime.GOMAXPROCS(runtime.NumCPU())
-	
+
 	// Initialize components
 	rateLimiter := ratelimit.NewHierarchicalLimiter(1000000) // 1M QPS base
 	schemaValidator := validator.NewSIMDValidator()
@@ -38,24 +46,27 @@ func main() {
 	if brokers := os.Getenv("KAFKA_BROKERS"); brokers != "" {
 		kafkaBrokers = []string{brokers}
 	}
-	kafkaProducer := producer.NewBatchProducer(kafkaBrokers)
-	
+	kafkaProducer := producer.NewBatchProducer(kafkaBrokers, metricsExporter)
+
 	// Create ingestion handler
-	var server *fasthttp.Server
-	
+	var (
+		server          *fasthttp.Server
+		enhancedHandler *ingestion.EnhancedHandler
+	)
+
 	if *backpressure {
 		log.Info("Starting gateway with backpressure management enabled")
-		enhancedHandler := ingestion.NewEnhancedHandler(schemaValidator, kafkaProducer, rateLimiter)
+		enhancedHandler = ingestion.NewEnhancedHandler(schemaValidator, kafkaProducer, rateLimiter, metricsExporter)
 		server = &fasthttp.Server{
-			Handler:                       enhancedHandler.HandleWithBackpressure,
+			Handler:                      enhancedHandler.HandleWithBackpressure,
 			Name:                         "flow-gateway",
-			Concurrency:                  256 * 1024,  // Support 256K concurrent connections
+			Concurrency:                  256 * 1024, // Support 256K concurrent connections
 			DisableKeepalive:             false,
 			TCPKeepalive:                 true,
-			TCPKeepalivePeriod:          60 * time.Second,
+			TCPKeepalivePeriod:           60 * time.Second,
 			MaxRequestBodySize:           10 * 1024 * 1024, // 10MB max
-			ReadBufferSize:               64 * 1024,         // 64KB read buffer
-			WriteBufferSize:              64 * 1024,         // 64KB write buffer
+			ReadBufferSize:               64 * 1024,        // 64KB read buffer
+			WriteBufferSize:              64 * 1024,        // 64KB write buffer
 			ReadTimeout:                  5 * time.Second,
 			WriteTimeout:                 5 * time.Second,
 			IdleTimeout:                  60 * time.Second,
@@ -67,26 +78,26 @@ func main() {
 			LogAllErrors:                 false,
 			SecureErrorLogMessage:        true,
 			StreamRequestBody:            true, // Stream large requests
-			
+
 			// Performance optimizations
-			NoDefaultServerHeader:        true,
-			NoDefaultDate:               true,
-			NoDefaultContentType:        true,
-			ReduceMemoryUsage:           false, // Keep false for performance
+			NoDefaultServerHeader: true,
+			NoDefaultDate:         true,
+			NoDefaultContentType:  true,
+			ReduceMemoryUsage:     false, // Keep false for performance
 		}
 	} else {
 		log.Info("Starting gateway without backpressure management")
-		handler := ingestion.NewHandler(schemaValidator, kafkaProducer, rateLimiter)
+		handler := ingestion.NewHandler(schemaValidator, kafkaProducer, rateLimiter, metricsExporter)
 		server = &fasthttp.Server{
-			Handler:                       handler.Handle,
+			Handler:                      handler.Handle,
 			Name:                         "flow-gateway",
-			Concurrency:                  256 * 1024,  // Support 256K concurrent connections
+			Concurrency:                  256 * 1024, // Support 256K concurrent connections
 			DisableKeepalive:             false,
 			TCPKeepalive:                 true,
-			TCPKeepalivePeriod:          60 * time.Second,
+			TCPKeepalivePeriod:           60 * time.Second,
 			MaxRequestBodySize:           10 * 1024 * 1024, // 10MB max
-			ReadBufferSize:               64 * 1024,         // 64KB read buffer
-			WriteBufferSize:              64 * 1024,         // 64KB write buffer
+			ReadBufferSize:               64 * 1024,        // 64KB read buffer
+			WriteBufferSize:              64 * 1024,        // 64KB write buffer
 			ReadTimeout:                  5 * time.Second,
 			WriteTimeout:                 5 * time.Second,
 			IdleTimeout:                  60 * time.Second,
@@ -98,14 +109,16 @@ func main() {
 			LogAllErrors:                 false,
 			SecureErrorLogMessage:        true,
 			StreamRequestBody:            true, // Stream large requests
-			
+
 			// Performance optimizations
-			NoDefaultServerHeader:        true,
-			NoDefaultDate:               true,
-			NoDefaultContentType:        true,
-			ReduceMemoryUsage:           false, // Keep false for performance
+			NoDefaultServerHeader: true,
+			NoDefaultDate:         true,
+			NoDefaultContentType:  true,
+			ReduceMemoryUsage:     false, // Keep false for performance
 		}
 	}
+
+	startRuntimeCollectors(metricsExporter, enhancedHandler)
 
 	// Use SO_REUSEPORT for better multi-core scaling
 	ln, err := reuseport.Listen("tcp4", ":8088")
@@ -150,4 +163,62 @@ func main() {
 	}
 
 	log.Info("Gateway exited")
+}
+
+func startRuntimeCollectors(metricsExporter *metrics.PrometheusExporter, enhanced *ingestion.EnhancedHandler) {
+	if metricsExporter == nil {
+		return
+	}
+
+	proc, err := process.NewProcess(int32(os.Getpid()))
+	if err != nil {
+		log.WithError(err).Warn("gateway: unable to initialize process metrics collector")
+		return
+	}
+
+	// Warm up CPU sampling to avoid first-call zero values.
+	if _, err := proc.Percent(0); err != nil {
+		log.WithError(err).Debug("gateway: initial CPU percent sample failed")
+	}
+
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			cpuPercent, err := proc.Percent(0)
+			if err != nil {
+				log.WithError(err).Debug("gateway: CPU percent sampling failed")
+				continue
+			}
+
+			memPercent, err := proc.MemoryPercent()
+			if err != nil {
+				log.WithError(err).Debug("gateway: memory percent sampling failed")
+				continue
+			}
+
+			fds, err := proc.NumFDs()
+			if err != nil {
+				log.WithError(err).Debug("gateway: file descriptor sampling failed")
+				fds = 0
+			}
+
+			metricsExporter.RecordSystemMetrics(
+				cpuPercent,
+				float64(memPercent),
+				int32(runtime.NumGoroutine()),
+				int64(fds),
+			)
+
+			if enhanced != nil {
+				queueMetrics := enhanced.GetQueueMetrics()
+				enhanced.PushSystemMetrics(ingestion.SystemMetrics{
+					CPUPercent:    cpuPercent,
+					MemoryPercent: float64(memPercent),
+					QueueDepth:    queueMetrics.Queued,
+				})
+			}
+		}
+	}()
 }
