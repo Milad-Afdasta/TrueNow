@@ -1,0 +1,88 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# Dependency directories
+vendor/
+
+# Go workspace file
+go.work.sum
+
+# Build directory - all compiled binaries go here
+/build/
+
+# Service-specific binaries (in case they're built in place)
+services/*/gateway
+services/*/control-plane
+services/*/hot-tier
+services/*/query-api
+services/*/monitor
+services/*/autoscaler
+services/*/stream-ingester
+services/*/watermark-service
+services/*/rebalancer
+services/*/main
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Environment files
+.env
+.env.local
+
+# Temporary files
+tmp/
+temp/
+
+# Coverage reports
+coverage/
+*.coverprofile
+
+# Profiling data
+*.prof
+*.pprof
+
+# Generated files
+*.pb.go
+*_grpc.pb.go
+
+# But track the already generated proto files
+!proto/**/*.pb.go
+!proto/**/*_grpc.pb.go
+!shared/proto/**/*.pb.go
+!shared/proto/**/*_grpc.pb.go
+
+# Docker volumes
+data/
+postgres-data/
+redis-data/
+
+# Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+
+# Package files
+*.tar.gz
+*.zip
