@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
@@ -35,12 +34,12 @@ func main() {
 
 	// Create components
 	queryCache := cache.NewQueryCache(config.CacheRedisAddr, config.CacheEnabled)
-	queryPlanner := planner.NewQueryPlanner()
+	queryPlanner := planner.NewQueryPlanner(len(config.HotTierEndpoints))
 	queryRouter := router.NewQueryRouter(config.HotTierEndpoints)
 
 	// Create HTTP server
 	r := mux.NewRouter()
-	
+
 	// Health check
 	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"status": "healthy"})
@@ -48,9 +47,9 @@ func main() {
 
 	// Query endpoint
 	r.HandleFunc("/v1/query", handleQuery(queryCache, queryPlanner, queryRouter)).Methods("POST")
-	
+
 	// Stats endpoint
-	r.HandleFunc("/v1/stats", handleStats(queryRouter)).Methods("GET")
+	r.HandleFunc("/v1/stats", handleStats(queryRouter, queryCache)).Methods("GET")
 
 	// Metrics endpoint (Prometheus format)
 	r.HandleFunc("/metrics", handleMetrics()).Methods("GET")
@@ -77,11 +76,11 @@ func main() {
 	<-quit
 
 	log.Info("Shutting down Query API...")
-	
+
 	// Graceful shutdown
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	
+
 	if err := server.Shutdown(ctx); err != nil {
 		log.Errorf("Server forced to shutdown: %v", err)
 	}
@@ -94,46 +93,45 @@ func main() {
 }
 
 // handleQuery processes query requests
-func handleQuery(cache *cache.QueryCache, planner *planner.QueryPlanner, router *router.QueryRouter) http.HandlerFunc {
+func handleQuery(cache *cache.QueryCache, qp *planner.QueryPlanner, qr *router.QueryRouter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		
-		// Parse query request
-		var req QueryRequest
+		ctx := r.Context()
+
+		var req planner.QueryRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
-		// Validate query
-		if err := validateQuery(&req); err != nil {
+		plan, err := qp.Plan(&req)
+		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
-		// Check cache
-		cacheKey := cache.GenerateKey(&req)
-		if cached, found := cache.Get(cacheKey); found {
-			w.Header().Set("X-Cache", "HIT")
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(cached)
-			return
+		cacheKey := plan.CacheKey
+		if cache != nil {
+			var cached router.QueryResult
+			found, err := cache.Get(ctx, cacheKey, &cached)
+			if err == nil && found {
+				w.Header().Set("X-Cache", "HIT")
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(&cached)
+				return
+			}
 		}
 
-		// Plan query - pass as interface{} since planner accepts that
-		plan := planner.Plan(&req)
-		
-		// Execute query
-		results, err := router.Execute(plan)
+		results, err := qr.Execute(ctx, plan)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		// Cache results
-		cache.Set(cacheKey, results, 60*time.Second)
+		if cache != nil {
+			_ = cache.Set(ctx, cacheKey, results, plan.Timeout)
+		}
 
-		// Return results
 		w.Header().Set("X-Cache", "MISS")
 		w.Header().Set("X-Query-Time", time.Since(start).String())
 		w.Header().Set("Content-Type", "application/json")
@@ -142,9 +140,14 @@ func handleQuery(cache *cache.QueryCache, planner *planner.QueryPlanner, router 
 }
 
 // handleStats returns query statistics
-func handleStats(router *router.QueryRouter) http.HandlerFunc {
+func handleStats(qr *router.QueryRouter, cache *cache.QueryCache) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		stats := router.GetStats()
+		stats := map[string]interface{}{
+			"router": qr.GetStats(),
+		}
+		if cache != nil {
+			stats["cache"] = cache.GetStats()
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(stats)
 	}
@@ -169,40 +172,11 @@ query_latency_seconds_bucket{le="+Inf"} 0
 	}
 }
 
-// validateQuery validates query parameters
-func validateQuery(req *QueryRequest) error {
-	if req.StartTime >= req.EndTime {
-		return fmt.Errorf("start_time must be before end_time")
-	}
-	
-	// Max time range: 24 hours (in microseconds)
-	if req.EndTime-req.StartTime > 86400000000 {
-		return fmt.Errorf("time range exceeds 24 hours")
-	}
-	
-	// Max groups: 10000
-	if len(req.GroupBy) > 10000 {
-		return fmt.Errorf("too many groups (max 10000)")
-	}
-	
-	return nil
-}
-
 type Config struct {
 	HTTPPort         string
 	HotTierEndpoints []string
 	CacheEnabled     bool
 	CacheRedisAddr   string
-}
-
-type QueryRequest struct {
-	Namespace string   `json:"namespace"`
-	Table     string   `json:"table"`
-	StartTime int64    `json:"start_time"`
-	EndTime   int64    `json:"end_time"`
-	GroupBy   []string `json:"group_by"`
-	Metrics   []string `json:"metrics"`
-	Filters   map[string]interface{} `json:"filters"`
 }
 
 func getEnvOrDefault(key, defaultVal string) string {

@@ -2,8 +2,10 @@ package router
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -12,205 +14,355 @@ import (
 	pb "github.com/Milad-Afdasta/TrueNow/shared/proto/pb/hottier"
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 )
+
+var errNoEndpoints = errors.New("query router: no hot-tier endpoints configured")
 
 // QueryRouter routes queries to hot-tier shards
 type QueryRouter struct {
 	endpoints []string
 	clients   []pb.HotTierClient
 	conns     []*grpc.ClientConn
-	
-	// Stats
-	queries   atomic.Uint64
-	errors    atomic.Uint64
-	cacheHits atomic.Uint64
-	latency   atomic.Uint64 // microseconds
-	
+
+	queries atomic.Uint64
+	errors  atomic.Uint64
+	latency atomic.Uint64 // microseconds
+
 	mu sync.RWMutex
 }
 
 // NewQueryRouter creates a new query router
 func NewQueryRouter(endpoints []string) *QueryRouter {
+	if len(endpoints) == 0 {
+		endpoints = []string{"localhost:9090"}
+	}
+	copyEndpoints := append([]string(nil), endpoints...)
+
 	qr := &QueryRouter{
-		endpoints: endpoints,
-		clients:   make([]pb.HotTierClient, len(endpoints)),
-		conns:     make([]*grpc.ClientConn, len(endpoints)),
+		endpoints: copyEndpoints,
+		clients:   make([]pb.HotTierClient, len(copyEndpoints)),
+		conns:     make([]*grpc.ClientConn, len(copyEndpoints)),
 	}
-	
-	// Connect to all endpoints
-	for i, endpoint := range endpoints {
-		conn, err := qr.connect(endpoint)
-		if err != nil {
-			log.Errorf("Failed to connect to hot-tier %s: %v", endpoint, err)
-			continue
+
+	for i := range copyEndpoints {
+		if err := qr.ensureClient(i); err != nil {
+			log.WithError(err).Warnf("query router: initial connect failed for %s", copyEndpoints[i])
 		}
-		
-		qr.conns[i] = conn
-		qr.clients[i] = pb.NewHotTierClient(conn)
 	}
-	
-	log.Infof("Query router connected to %d hot-tier endpoints", len(endpoints))
-	
+
+	log.Infof("Query router configured with %d hot-tier endpoints", len(copyEndpoints))
 	return qr
 }
 
-// connect establishes gRPC connection
+func (qr *QueryRouter) ensureClient(idx int) error {
+	if idx < 0 || idx >= len(qr.endpoints) {
+		return fmt.Errorf("query router: endpoint index out of range: %d", idx)
+	}
+
+	qr.mu.RLock()
+	client := qr.clients[idx]
+	qr.mu.RUnlock()
+	if client != nil {
+		return nil
+	}
+
+	endpoint := qr.endpoints[idx]
+	conn, err := qr.connect(endpoint)
+	if err != nil {
+		return err
+	}
+
+	qr.mu.Lock()
+	defer qr.mu.Unlock()
+
+	if qr.conns[idx] != nil {
+		_ = qr.conns[idx].Close()
+	}
+	qr.conns[idx] = conn
+	qr.clients[idx] = pb.NewHotTierClient(conn)
+	log.Infof("Query router connected to %s", endpoint)
+	return nil
+}
+
 func (qr *QueryRouter) connect(endpoint string) (*grpc.ClientConn, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	opts := []grpc.DialOption{
-		grpc.WithInsecure(),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithBlock(),
 		grpc.WithDefaultCallOptions(
-			grpc.MaxCallRecvMsgSize(100 * 1024 * 1024), // 100MB
+			grpc.MaxCallRecvMsgSize(100 * 1024 * 1024),
 		),
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{
+			Time:                30 * time.Second,
+			Timeout:             10 * time.Second,
+			PermitWithoutStream: true,
+		}),
 	}
-	
+
 	return grpc.DialContext(ctx, endpoint, opts...)
 }
 
 // Execute executes a query plan
-func (qr *QueryRouter) Execute(plan interface{}) (*QueryResult, error) {
+func (qr *QueryRouter) Execute(ctx context.Context, plan *planner.QueryPlan) (*QueryResult, error) {
 	start := time.Now()
 	qr.queries.Add(1)
-	
-	// Import the planner package for QueryPlan type
-	// Type assert to get the actual plan from planner
-	queryPlan, ok := plan.(*planner.QueryPlan)
-	if !ok {
+
+	if plan == nil {
 		qr.errors.Add(1)
-		return nil, fmt.Errorf("invalid plan type: %T", plan)
+		return nil, fmt.Errorf("query router: nil plan")
 	}
-	
-	// For simplified implementation, query first shard only
-	// In production, fan out to all shards and merge results
-	
-	if len(qr.clients) == 0 {
+	if len(qr.endpoints) == 0 {
 		qr.errors.Add(1)
-		return nil, fmt.Errorf("no available hot-tier nodes")
+		return nil, errNoEndpoints
 	}
-	
-	// Create query request using actual plan
-	groupBy := ""
-	if len(queryPlan.GroupBy) > 0 {
-		groupBy = queryPlan.GroupBy[0]
+
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	
-	req := &pb.QueryRequest{
-		StartUs:            queryPlan.StartTime, // In microseconds
-		EndUs:              queryPlan.EndTime,   // In microseconds
-		GroupBy:            groupBy,
-		Metrics:            []string{"count", "sum"},
-		IncludeUniques:     true,
-		IncludePercentiles: true,
+	if plan.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, plan.Timeout)
+		defer cancel()
 	}
-	
-	// Query first client (in production, query all shards)
-	client := qr.clients[0]
-	if client == nil {
-		qr.errors.Add(1)
-		return nil, fmt.Errorf("client not available")
+
+	responses := make([]*pb.QueryResponse, len(plan.Shards))
+	errCh := make(chan error, len(plan.Shards))
+	var wg sync.WaitGroup
+
+	for i, shardID := range plan.Shards {
+		wg.Add(1)
+		go func(index int, shard int) {
+			defer wg.Done()
+			resp, err := qr.queryShard(ctx, plan, shard)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			responses[index] = resp
+		}(i, shardID)
 	}
-	
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	
-	resp, err := client.Query(ctx, req)
-	if err != nil {
-		qr.errors.Add(1)
-		return nil, fmt.Errorf("query failed: %w", err)
+
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			qr.errors.Add(1)
+			return nil, err
+		}
 	}
-	
-	// Convert response
-	result := &QueryResult{
-		Results:     make([]map[string]interface{}, 0, len(resp.Results)),
-		WatermarkUs: resp.WatermarkUs,
-		QueryTimeMs: time.Since(start).Milliseconds(),
-	}
-	
-	for _, r := range resp.Results {
-		result.Results = append(result.Results, map[string]interface{}{
-			"timestamp":    r.TimestampUs,
-			"group":        r.GroupKey,
-			"count":        r.Count,
-			"sum":          cleanFloat(r.Sum),
-			"min":          cleanFloat(r.Min),
-			"max":          cleanFloat(r.Max),
-			"unique_count": r.UniqueCount,
-			"p50":          cleanFloat(r.P50),
-			"p95":          cleanFloat(r.P95),
-			"p99":          cleanFloat(r.P99),
-		})
-	}
-	
-	// Update stats
+
+	result := mergeResponses(plan, responses)
+	result.QueryTimeMs = time.Since(start).Milliseconds()
 	qr.latency.Store(uint64(time.Since(start).Microseconds()))
-	
-	log.Debugf("Query executed in %v, returned %d results",
-		time.Since(start), len(result.Results))
-	
 	return result, nil
 }
 
-// MergeResults merges results from multiple shards
-func (qr *QueryRouter) MergeResults(results []*QueryResult) *QueryResult {
-	if len(results) == 0 {
+func (qr *QueryRouter) queryShard(ctx context.Context, plan *planner.QueryPlan, shard int) (*pb.QueryResponse, error) {
+	client, err := qr.clientForShard(shard)
+	if err != nil {
+		return nil, err
+	}
+
+	req := &pb.QueryRequest{
+		StartUs:            plan.StartTime,
+		EndUs:              plan.EndTime,
+		Namespace:          plan.Namespace,
+		Table:              plan.Table,
+		GroupBy:            firstGroup(plan.GroupBy),
+		Metrics:            plannerCanonical(plan.Metrics),
+		Filters:            filtersToStrings(plan.Filters),
+		IncludeUniques:     true,
+		IncludePercentiles: true,
+	}
+
+	resp, err := client.Query(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("shard %d query failed: %w", shard, err)
+	}
+	return resp, nil
+}
+
+func (qr *QueryRouter) clientForShard(shard int) (pb.HotTierClient, error) {
+	if len(qr.endpoints) == 0 {
+		return nil, errNoEndpoints
+	}
+	idx := shard % len(qr.endpoints)
+	if err := qr.ensureClient(idx); err != nil {
+		return nil, err
+	}
+	qr.mu.RLock()
+	client := qr.clients[idx]
+	qr.mu.RUnlock()
+	if client == nil {
+		return nil, fmt.Errorf("query router: client unavailable for shard %d", shard)
+	}
+	return client, nil
+}
+
+func mergeResponses(plan *planner.QueryPlan, responses []*pb.QueryResponse) *QueryResult {
+	if len(responses) == 0 {
 		return &QueryResult{}
 	}
-	
-	if len(results) == 1 {
-		return results[0]
+
+	type aggKey struct {
+		timestamp int64
+		group     string
 	}
-	
-	// Merge logic:
-	// 1. Combine results by timestamp and group
-	// 2. Sum counts and sums
-	// 3. Recalculate min/max
-	// 4. Merge HLL sketches for uniques
-	// 5. Merge T-Digest for percentiles
-	
-	merged := &QueryResult{
-		Results:     make([]map[string]interface{}, 0),
-		WatermarkUs: results[0].WatermarkUs,
+
+	type aggVal struct {
+		sum         float64
+		count       int64
+		min         float64
+		max         float64
+		unique      int64
+		weightedP50 float64
+		weightedP95 float64
+		weightedP99 float64
+		weight      float64
 	}
-	
-	// Simplified merge - in production, implement proper aggregation
-	for _, result := range results {
-		merged.Results = append(merged.Results, result.Results...)
-		merged.QueryTimeMs += result.QueryTimeMs
-		
-		// Update watermark to minimum
-		if result.WatermarkUs < merged.WatermarkUs {
-			merged.WatermarkUs = result.WatermarkUs
+
+	rows := make(map[aggKey]*aggVal)
+	watermark := responses[0].GetWatermarkUs()
+
+	for _, resp := range responses {
+		if resp == nil {
+			continue
+		}
+		if resp.WatermarkUs < watermark {
+			watermark = resp.WatermarkUs
+		}
+		for _, r := range resp.Results {
+			key := aggKey{timestamp: r.TimestampUs, group: r.GroupKey}
+			entry, ok := rows[key]
+			if !ok {
+				entry = &aggVal{min: math.MaxFloat64, max: -math.MaxFloat64}
+				rows[key] = entry
+			}
+			entry.sum += r.Sum
+			entry.count += r.Count
+			if r.Min < entry.min {
+				entry.min = r.Min
+			}
+			if r.Max > entry.max {
+				entry.max = r.Max
+			}
+			entry.unique += r.UniqueCount
+			weight := float64(r.Count)
+			if weight <= 0 {
+				weight = 1
+			}
+			entry.weight += weight
+			entry.weightedP50 += r.P50 * weight
+			entry.weightedP95 += r.P95 * weight
+			entry.weightedP99 += r.P99 * weight
 		}
 	}
-	
-	return merged
+
+	result := &QueryResult{
+		Rows:        make([]ResultRow, 0, len(rows)),
+		WatermarkUs: watermark,
+	}
+
+	for key, val := range rows {
+		row := ResultRow{
+			Timestamp:   key.timestamp,
+			Group:       key.group,
+			Sum:         cleanFloat(val.sum),
+			Count:       val.count,
+			Min:         cleanFloat(val.min),
+			Max:         cleanFloat(val.max),
+			UniqueCount: val.unique,
+		}
+		if val.count == 0 {
+			row.Min = 0
+			row.Max = 0
+		}
+		if val.weight > 0 {
+			row.P50 = cleanFloat(val.weightedP50 / val.weight)
+			row.P95 = cleanFloat(val.weightedP95 / val.weight)
+			row.P99 = cleanFloat(val.weightedP99 / val.weight)
+		}
+		result.Rows = append(result.Rows, row)
+	}
+
+	sort.Slice(result.Rows, func(i, j int) bool {
+		if result.Rows[i].Timestamp == result.Rows[j].Timestamp {
+			return result.Rows[i].Group < result.Rows[j].Group
+		}
+		return result.Rows[i].Timestamp < result.Rows[j].Timestamp
+	})
+
+	return result
+}
+
+func filtersToStrings(filters map[string]interface{}) []string {
+	if len(filters) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(filters))
+	for k := range filters {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	result := make([]string, 0, len(keys))
+	for _, k := range keys {
+		result = append(result, fmt.Sprintf("%s=%v", k, filters[k]))
+	}
+	return result
+}
+
+func firstGroup(groups []string) string {
+	if len(groups) == 0 {
+		return ""
+	}
+	return groups[0]
+}
+
+func plannerCanonical(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	clone := append([]string(nil), values...)
+	sort.Strings(clone)
+	return clone
 }
 
 // Close closes all connections
 func (qr *QueryRouter) Close() {
 	qr.mu.Lock()
 	defer qr.mu.Unlock()
-	
-	for _, conn := range qr.conns {
+
+	for i, conn := range qr.conns {
 		if conn != nil {
-			conn.Close()
+			_ = conn.Close()
 		}
+		qr.conns[i] = nil
+		qr.clients[i] = nil
 	}
-	
+
 	log.Info("Query router closed")
 }
 
 // GetStats returns router statistics
 func (qr *QueryRouter) GetStats() map[string]uint64 {
+	qr.mu.RLock()
+	active := uint64(0)
+	for _, client := range qr.clients {
+		if client != nil {
+			active++
+		}
+	}
+	qr.mu.RUnlock()
+
 	return map[string]uint64{
 		"queries":      qr.queries.Load(),
 		"errors":       qr.errors.Load(),
-		"cache_hits":   qr.cacheHits.Load(),
 		"latency_us":   qr.latency.Load(),
-		"active_nodes": uint64(len(qr.clients)),
+		"active_nodes": active,
 	}
 }
 
@@ -222,9 +374,23 @@ func cleanFloat(f float64) float64 {
 	return f
 }
 
+// ResultRow represents a single row in query results
+type ResultRow struct {
+	Timestamp   int64   `json:"timestamp"`
+	Group       string  `json:"group"`
+	Sum         float64 `json:"sum"`
+	Count       int64   `json:"count"`
+	Min         float64 `json:"min"`
+	Max         float64 `json:"max"`
+	UniqueCount int64   `json:"unique_count"`
+	P50         float64 `json:"p50"`
+	P95         float64 `json:"p95"`
+	P99         float64 `json:"p99"`
+}
+
 // QueryResult represents query results
 type QueryResult struct {
-	Results     []map[string]interface{} `json:"results"`
-	WatermarkUs int64                    `json:"watermark_us"`
-	QueryTimeMs int64                    `json:"query_time_ms"`
+	Rows        []ResultRow `json:"results"`
+	WatermarkUs int64       `json:"watermark_us"`
+	QueryTimeMs int64       `json:"query_time_ms"`
 }

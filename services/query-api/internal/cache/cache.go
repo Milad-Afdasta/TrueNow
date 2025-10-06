@@ -2,14 +2,13 @@ package cache
 
 import (
 	"context"
-	"crypto/md5"
-	"encoding/hex"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 	log "github.com/sirupsen/logrus"
+	"sync/atomic"
 )
 
 // QueryCache caches query results in Redis
@@ -18,6 +17,8 @@ type QueryCache struct {
 	enabled bool
 	ttl     time.Duration
 	ctx     context.Context
+	hits    atomic.Uint64
+	misses  atomic.Uint64
 }
 
 // NewQueryCache creates a new query cache
@@ -26,28 +27,28 @@ func NewQueryCache(addr string, enabled bool) *QueryCache {
 		log.Info("Query cache disabled")
 		return &QueryCache{enabled: false}
 	}
-	
+
 	client := redis.NewClient(&redis.Options{
-		Addr:           addr,
-		Password:       "",
-		DB:             0,
-		MaxRetries:     3,
-		PoolSize:       10,
-		MinIdleConns:   5,
-		MaxIdleConns:   10,
+		Addr:            addr,
+		Password:        "",
+		DB:              0,
+		MaxRetries:      3,
+		PoolSize:        10,
+		MinIdleConns:    5,
+		MaxIdleConns:    10,
 		ConnMaxIdleTime: 5 * time.Minute,
 	})
-	
+
 	ctx := context.Background()
-	
+
 	// Test connection
 	if err := client.Ping(ctx).Err(); err != nil {
 		log.Errorf("Failed to connect to Redis: %v", err)
 		return &QueryCache{enabled: false}
 	}
-	
+
 	log.Infof("Query cache connected to Redis at %s", addr)
-	
+
 	return &QueryCache{
 		client:  client,
 		enabled: true,
@@ -57,101 +58,110 @@ func NewQueryCache(addr string, enabled bool) *QueryCache {
 }
 
 // Get retrieves cached result
-func (qc *QueryCache) Get(key string) (interface{}, bool) {
+func (qc *QueryCache) Get(ctx context.Context, key string, dest interface{}) (bool, error) {
 	if !qc.enabled || qc.client == nil {
-		return nil, false
+		return false, nil
 	}
-	
-	val, err := qc.client.Get(qc.ctx, key).Result()
-	if err == redis.Nil {
-		return nil, false
-	} else if err != nil {
-		log.Warnf("Cache get error: %v", err)
-		return nil, false
+
+	if ctx == nil {
+		ctx = qc.ctx
 	}
-	
-	var result interface{}
-	if err := json.Unmarshal([]byte(val), &result); err != nil {
-		log.Warnf("Cache unmarshal error: %v", err)
-		return nil, false
+
+	val, err := qc.client.Get(ctx, key).Bytes()
+	if errors.Is(err, redis.Nil) {
+		qc.misses.Add(1)
+		return false, nil
 	}
-	
+	if err != nil {
+		qc.misses.Add(1)
+		log.WithError(err).Warn("query cache: get failed")
+		return false, err
+	}
+
+	if dest != nil {
+		if err := json.Unmarshal(val, dest); err != nil {
+			qc.misses.Add(1)
+			log.WithError(err).Warn("query cache: unmarshal failed")
+			return false, err
+		}
+	}
+
+	qc.hits.Add(1)
 	log.Debugf("Cache hit for key: %s", key)
-	return result, true
+	return true, nil
 }
 
 // Set stores result in cache
-func (qc *QueryCache) Set(key string, value interface{}, ttl time.Duration) {
-	if !qc.enabled || qc.client == nil {
-		return
-	}
-	
-	data, err := json.Marshal(value)
-	if err != nil {
-		log.Warnf("Cache marshal error: %v", err)
-		return
-	}
-	
-	if ttl == 0 {
-		ttl = qc.ttl
-	}
-	
-	err = qc.client.Set(qc.ctx, key, data, ttl).Err()
-	if err != nil {
-		log.Warnf("Cache set error: %v", err)
-		return
-	}
-	
-	log.Debugf("Cached result with key: %s, ttl: %v", key, ttl)
-}
-
-// Delete removes cached result
-func (qc *QueryCache) Delete(key string) {
-	if !qc.enabled || qc.client == nil {
-		return
-	}
-	
-	err := qc.client.Del(qc.ctx, key).Err()
-	if err != nil {
-		log.Warnf("Cache delete error: %v", err)
-	}
-}
-
-// GenerateKey generates cache key for query
-func (qc *QueryCache) GenerateKey(req interface{}) string {
-	// Create deterministic key from request
-	data, _ := json.Marshal(req)
-	h := md5.New()
-	h.Write(data)
-	return fmt.Sprintf("query:%s", hex.EncodeToString(h.Sum(nil)))
-}
-
-// Clear clears all cached queries
-func (qc *QueryCache) Clear() error {
+func (qc *QueryCache) Set(ctx context.Context, key string, value interface{}, ttl time.Duration) error {
 	if !qc.enabled || qc.client == nil {
 		return nil
 	}
-	
-	// Clear all keys with query: prefix
-	iter := qc.client.Scan(qc.ctx, 0, "query:*", 0).Iterator()
+
+	if ttl <= 0 {
+		ttl = qc.ttl
+	}
+	if ctx == nil {
+		ctx = qc.ctx
+	}
+
+	data, err := json.Marshal(value)
+	if err != nil {
+		log.WithError(err).Warn("query cache: marshal failed")
+		return err
+	}
+
+	if err := qc.client.Set(ctx, key, data, ttl).Err(); err != nil {
+		log.WithError(err).Warn("query cache: set failed")
+		return err
+	}
+
+	log.Debugf("Cached result with key: %s, ttl: %v", key, ttl)
+	return nil
+}
+
+// Delete removes cached result
+func (qc *QueryCache) Delete(ctx context.Context, key string) {
+	if !qc.enabled || qc.client == nil {
+		return
+	}
+
+	if ctx == nil {
+		ctx = qc.ctx
+	}
+
+	if err := qc.client.Del(ctx, key).Err(); err != nil {
+		log.WithError(err).Warn("query cache: delete failed")
+	}
+}
+
+// Clear clears all cached queries
+func (qc *QueryCache) Clear(ctx context.Context) error {
+	if !qc.enabled || qc.client == nil {
+		return nil
+	}
+
+	if ctx == nil {
+		ctx = qc.ctx
+	}
+
+	iter := qc.client.Scan(ctx, 0, "query:*", 0).Iterator()
 	var keys []string
-	
-	for iter.Next(qc.ctx) {
+
+	for iter.Next(ctx) {
 		keys = append(keys, iter.Val())
 	}
-	
+
 	if err := iter.Err(); err != nil {
 		return err
 	}
-	
+
 	if len(keys) > 0 {
-		err := qc.client.Del(qc.ctx, keys...).Err()
-		if err != nil {
+		if err := qc.client.Del(ctx, keys...).Err(); err != nil {
 			return err
 		}
 		log.Infof("Cleared %d cached queries", len(keys))
 	}
-	
+
 	return nil
 }
 
@@ -168,11 +178,10 @@ func (qc *QueryCache) GetStats() map[string]interface{} {
 	if !qc.enabled || qc.client == nil {
 		return map[string]interface{}{"enabled": false}
 	}
-	
-	info := qc.client.Info(qc.ctx, "stats").Val()
-	
+
 	return map[string]interface{}{
 		"enabled": true,
-		"info":    info,
+		"hits":    qc.hits.Load(),
+		"misses":  qc.misses.Load(),
 	}
 }
