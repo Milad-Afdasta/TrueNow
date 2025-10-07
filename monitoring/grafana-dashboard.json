@@ -1,180 +1,487 @@
 {
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "__requires": [
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "9.0.0"
+    },
+    {
+      "type": "panel",
+      "id": "stat",
+      "name": "Stat",
+      "version": "9.0.0"
+    },
+    {
+      "type": "panel",
+      "id": "timeseries",
+      "name": "Time series",
+      "version": "9.0.0"
+    },
+    {
+      "type": "panel",
+      "id": "bargauge",
+      "name": "Bar gauge",
+      "version": "9.0.0"
+    },
+    {
+      "type": "datasource",
+      "id": "prometheus",
+      "name": "Prometheus",
+      "version": "1.0.0"
+    }
+  ],
   "dashboard": {
-    "title": "Real-Time Analytics Platform",
-    "panels": [
-      {
-        "title": "Request Rate",
-        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
-        "targets": [
-          {
-            "expr": "rate(flow_requests_total[1m])",
-            "legendFormat": "Total"
-          },
-          {
-            "expr": "rate(flow_requests_success_total[1m])",
-            "legendFormat": "Success"
-          },
-          {
-            "expr": "rate(flow_requests_failed_total[1m])",
-            "legendFormat": "Failed"
-          }
-        ],
-        "type": "graph"
-      },
-      {
-        "title": "Request Latency (p99)",
-        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
-        "targets": [
-          {
-            "expr": "histogram_quantile(0.99, flow_request_duration_seconds)",
-            "legendFormat": "p99"
-          },
-          {
-            "expr": "histogram_quantile(0.95, flow_request_duration_seconds)",
-            "legendFormat": "p95"
-          },
-          {
-            "expr": "histogram_quantile(0.50, flow_request_duration_seconds)",
-            "legendFormat": "p50"
-          }
-        ],
-        "type": "graph"
-      },
-      {
-        "title": "Events Throughput",
-        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
-        "targets": [
-          {
-            "expr": "rate(flow_events_ingested_total[1m])",
-            "legendFormat": "Ingested/sec"
-          },
-          {
-            "expr": "rate(flow_events_processed_total[1m])",
-            "legendFormat": "Processed/sec"
-          }
-        ],
-        "type": "graph"
-      },
-      {
-        "title": "Data Freshness",
-        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
-        "targets": [
-          {
-            "expr": "flow_watermark_lag_ms",
-            "legendFormat": "Watermark Lag"
-          },
-          {
-            "expr": "histogram_quantile(0.99, flow_data_freshness_ms)",
-            "legendFormat": "p99 Freshness"
-          }
-        ],
-        "type": "graph",
-        "yaxes": [
-          {
-            "format": "ms",
-            "label": "Milliseconds"
-          }
-        ]
-      },
-      {
-        "title": "Kafka Metrics",
-        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
-        "targets": [
-          {
-            "expr": "rate(flow_kafka_producer_sent_total[1m])",
-            "legendFormat": "Messages/sec"
-          },
-          {
-            "expr": "flow_kafka_consumer_lag",
-            "legendFormat": "Consumer Lag"
-          },
-          {
-            "expr": "rate(flow_kafka_producer_errors_total[1m])",
-            "legendFormat": "Errors/sec"
-          }
-        ],
-        "type": "graph"
-      },
-      {
-        "title": "Backpressure Status",
-        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
-        "targets": [
-          {
-            "expr": "flow_queue_depth",
-            "legendFormat": "Queue Depth"
-          },
-          {
-            "expr": "flow_queue_capacity",
-            "legendFormat": "Queue Capacity"
-          },
-          {
-            "expr": "rate(flow_shed_requests_total[1m])",
-            "legendFormat": "Shed Rate"
-          },
-          {
-            "expr": "flow_circuit_breaker_open",
-            "legendFormat": "Circuit Breaker"
-          }
-        ],
-        "type": "graph"
-      },
-      {
-        "title": "System Resources",
-        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
-        "targets": [
-          {
-            "expr": "flow_cpu_usage_percent",
-            "legendFormat": "CPU %"
-          },
-          {
-            "expr": "flow_memory_usage_percent",
-            "legendFormat": "Memory %"
-          },
-          {
-            "expr": "flow_goroutines",
-            "legendFormat": "Goroutines"
-          }
-        ],
-        "type": "graph"
-      },
-      {
-        "title": "Cache Performance",
-        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
-        "targets": [
-          {
-            "expr": "flow_cache_hit_rate",
-            "legendFormat": "Hit Rate"
-          },
-          {
-            "expr": "rate(flow_cache_evictions_total[1m])",
-            "legendFormat": "Evictions/sec"
-          },
-          {
-            "expr": "flow_cache_size",
-            "legendFormat": "Cache Size"
-          }
-        ],
-        "type": "graph"
-      },
-      {
-        "title": "Error Rate by Type",
-        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 32},
-        "targets": [
-          {
-            "expr": "rate(flow_errors_total[1m])",
-            "legendFormat": "{{type}}"
-          }
-        ],
-        "type": "graph"
-      }
-    ],
-    "refresh": "5s",
+    "title": "TrueNow Operations Overview",
+    "uid": "truenow-ops",
+    "timezone": "",
+    "schemaVersion": 36,
+    "version": 1,
+    "refresh": "10s",
     "time": {
       "from": "now-1h",
       "to": "now"
     },
     "timepicker": {
-      "refresh_intervals": ["5s", "10s", "30s", "1m", "5m"]
-    }
+      "refresh_intervals": [
+        "5s",
+        "10s",
+        "30s",
+        "1m",
+        "5m",
+        "15m"
+      ],
+      "time_options": [
+        "5m",
+        "15m",
+        "1h",
+        "6h",
+        "12h",
+        "24h"
+      ]
+    },
+    "templating": {
+      "list": [
+        {
+          "name": "datasource",
+          "type": "datasource",
+          "pluginId": "prometheus",
+          "label": "Datasource",
+          "query": "prometheus",
+          "current": {
+            "text": "Prometheus",
+            "value": "${DS_PROMETHEUS}"
+          },
+          "options": [],
+          "refresh": 1
+        }
+      ]
+    },
+    "panels": [
+      {
+        "type": "stat",
+        "title": "Gateway p99 Latency",
+        "datasource": {
+          "uid": "${datasource}"
+        },
+        "gridPos": {
+          "h": 4,
+          "w": 6,
+          "x": 0,
+          "y": 0
+        },
+        "targets": [
+          {
+            "expr": "gateway_request_duration_seconds{quantile=\"0.99\"}",
+            "legendFormat": "p99"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "decimals": 3
+          }
+        },
+        "options": {
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ]
+          }
+        }
+      },
+      {
+        "type": "stat",
+        "title": "Ingress QPS",
+        "datasource": {
+          "uid": "${datasource}"
+        },
+        "gridPos": {
+          "h": 4,
+          "w": 6,
+          "x": 6,
+          "y": 0
+        },
+        "targets": [
+          {
+            "expr": "rate(gateway_requests_total[1m])",
+            "legendFormat": "QPS"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "req/s",
+            "decimals": 1
+          }
+        },
+        "options": {
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ]
+          }
+        }
+      },
+      {
+        "type": "stat",
+        "title": "Watermark Lag",
+        "datasource": {
+          "uid": "${datasource}"
+        },
+        "gridPos": {
+          "h": 4,
+          "w": 6,
+          "x": 12,
+          "y": 0
+        },
+        "targets": [
+          {
+            "expr": "gateway_watermark_lag_ms",
+            "legendFormat": "Lag"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "ms",
+            "decimals": 0
+          }
+        },
+        "options": {
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ]
+          }
+        }
+      },
+      {
+        "type": "stat",
+        "title": "Error Rate",
+        "datasource": {
+          "uid": "${datasource}"
+        },
+        "gridPos": {
+          "h": 4,
+          "w": 6,
+          "x": 18,
+          "y": 0
+        },
+        "targets": [
+          {
+            "expr": "rate(gateway_requests_failed_total[5m])",
+            "legendFormat": "Errors/s"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "req/s",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": null
+                },
+                {
+                  "color": "red",
+                  "value": 5
+                }
+              ]
+            }
+          }
+        },
+        "options": {
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ]
+          }
+        }
+      },
+      {
+        "type": "timeseries",
+        "title": "Ingestion Requests",
+        "datasource": {
+          "uid": "${datasource}"
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 4
+        },
+        "targets": [
+          {
+            "expr": "rate(gateway_requests_total[1m])",
+            "legendFormat": "Total"
+          },
+          {
+            "expr": "rate(gateway_requests_success_total[1m])",
+            "legendFormat": "Success"
+          },
+          {
+            "expr": "rate(gateway_requests_failed_total[1m])",
+            "legendFormat": "Failed"
+          }
+        ]
+      },
+      {
+        "type": "timeseries",
+        "title": "Request Latency Quantiles",
+        "datasource": {
+          "uid": "${datasource}"
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 12,
+          "y": 4
+        },
+        "targets": [
+          {
+            "expr": "gateway_request_duration_seconds{quantile=\"0.50\"}",
+            "legendFormat": "p50"
+          },
+          {
+            "expr": "gateway_request_duration_seconds{quantile=\"0.95\"}",
+            "legendFormat": "p95"
+          },
+          {
+            "expr": "gateway_request_duration_seconds{quantile=\"0.99\"}",
+            "legendFormat": "p99"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s"
+          }
+        }
+      },
+      {
+        "type": "timeseries",
+        "title": "Event Throughput",
+        "datasource": {
+          "uid": "${datasource}"
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 12
+        },
+        "targets": [
+          {
+            "expr": "rate(gateway_events_ingested_total[1m])",
+            "legendFormat": "Ingested"
+          },
+          {
+            "expr": "rate(gateway_events_processed_total[1m])",
+            "legendFormat": "Processed"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "events/s"
+          }
+        }
+      },
+      {
+        "type": "timeseries",
+        "title": "Data Freshness",
+        "datasource": {
+          "uid": "${datasource}"
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 12,
+          "y": 12
+        },
+        "targets": [
+          {
+            "expr": "gateway_watermark_lag_ms",
+            "legendFormat": "Lag"
+          },
+          {
+            "expr": "gateway_data_freshness_ms{quantile=\"0.99\"}",
+            "legendFormat": "p99"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "ms"
+          }
+        }
+      },
+      {
+        "type": "timeseries",
+        "title": "Kafka Health",
+        "datasource": {
+          "uid": "${datasource}"
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 20
+        },
+        "targets": [
+          {
+            "expr": "rate(gateway_kafka_producer_sent_total[1m])",
+            "legendFormat": "Producer"
+          },
+          {
+            "expr": "rate(gateway_kafka_producer_errors_total[1m])",
+            "legendFormat": "Errors"
+          },
+          {
+            "expr": "gateway_kafka_consumer_lag",
+            "legendFormat": "Lag"
+          }
+        ]
+      },
+      {
+        "type": "timeseries",
+        "title": "Backpressure & Rate Limiting",
+        "datasource": {
+          "uid": "${datasource}"
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 12,
+          "y": 20
+        },
+        "targets": [
+          {
+            "expr": "gateway_queue_depth",
+            "legendFormat": "Queue Depth"
+          },
+          {
+            "expr": "gateway_queue_capacity",
+            "legendFormat": "Capacity"
+          },
+          {
+            "expr": "rate(gateway_shed_requests_total[1m])",
+            "legendFormat": "Shed/s"
+          },
+          {
+            "expr": "gateway_circuit_breaker_open",
+            "legendFormat": "Circuit"
+          }
+        ]
+      },
+      {
+        "type": "timeseries",
+        "title": "System Resources",
+        "datasource": {
+          "uid": "${datasource}"
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 28
+        },
+        "targets": [
+          {
+            "expr": "gateway_cpu_usage_percent / 100",
+            "legendFormat": "CPU"
+          },
+          {
+            "expr": "gateway_memory_usage_percent / 100",
+            "legendFormat": "Memory"
+          },
+          {
+            "expr": "gateway_goroutines",
+            "legendFormat": "Goroutines"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percentunit"
+          }
+        }
+      },
+      {
+        "type": "timeseries",
+        "title": "Query Cache",
+        "datasource": {
+          "uid": "${datasource}"
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 12,
+          "y": 28
+        },
+        "targets": [
+          {
+            "expr": "gateway_cache_hit_rate",
+            "legendFormat": "Hit Rate"
+          },
+          {
+            "expr": "rate(gateway_cache_evictions_total[5m])",
+            "legendFormat": "Evictions"
+          },
+          {
+            "expr": "gateway_cache_size",
+            "legendFormat": "Size"
+          }
+        ]
+      },
+      {
+        "type": "bargauge",
+        "title": "Error Rate by Type",
+        "datasource": {
+          "uid": "${datasource}"
+        },
+        "gridPos": {
+          "h": 6,
+          "w": 24,
+          "x": 0,
+          "y": 36
+        },
+        "targets": [
+          {
+            "expr": "rate(gateway_errors_total[5m])",
+            "legendFormat": "{{type}}"
+          }
+        ],
+        "options": {
+          "orientation": "horizontal",
+          "displayMode": "lcd"
+        }
+      }
+    ]
   }
 }
